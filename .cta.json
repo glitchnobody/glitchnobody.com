@@ -1,0 +1,20 @@
+{
+  "projectName": "glitchnobody.com",
+  "mode": "file-router",
+  "bundler": "vite",
+  "typescript": true,
+  "tailwind": true,
+  "packageManager": "npm",
+  "git": true,
+  "install": true,
+  "addOnOptions": {},
+  "projectPreset": "default",
+  "routerOnly": false,
+  "includeExamples": true,
+  "version": 1,
+  "framework": "react",
+  "chosenAddOns": [
+    "tanstack-query",
+    "cloudflare"
+  ]
+}
