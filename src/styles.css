@@ -372,74 +372,37 @@ body {
   }
 }
 
-/* ---- theme switch, site-wide: the new theme sweeps up from the bottom (see theme.ts) ---- */
+/* ---- theme switch: the old page is cut away from the top down, revealing the new one ---- */
 ::view-transition-old(root) {
-  animation: none;
+  z-index: 1;
+  animation: theme-reveal 0.7s cubic-bezier(0.65, 0, 0.35, 1) both;
 }
 
 ::view-transition-new(root) {
-  mask-image: linear-gradient(to top, #000 45%, transparent 55%);
-  mask-size: 100% 300%;
-  mask-repeat: no-repeat;
-  animation: theme-sweep 1.6s cubic-bezier(0.45, 0, 0.25, 1) both;
+  animation: none;
 }
 
-@keyframes theme-sweep {
+@keyframes theme-reveal {
   from {
-    mask-position: 0 0%;
+    clip-path: inset(0 0 0 0);
   }
   to {
-    mask-position: 0 100%;
+    clip-path: inset(100% 0 0 0);
   }
 }
 
-/* the header is captured on its own (its blur would otherwise drop out of the page snapshot) */
+/* the header is captured on its own (its blur drops out of the page snapshot); it sits where the
+   reveal starts, so it simply switches */
 .notch {
   view-transition-name: site-nav;
 }
 
-/* the scene does its own depth wipe, so it is shown live and not swept */
-.card {
-  view-transition-name: scene;
-}
-
-::view-transition-old(scene) {
+::view-transition-old(site-nav) {
   display: none;
 }
 
-::view-transition-new(scene) {
+::view-transition-new(site-nav) {
   animation: none;
-}
-
-/* the colour band riding the edge of the sweep */
-.theme-band {
-  position: fixed;
-  inset-inline: 0;
-  top: 0;
-  height: 22vh;
-  pointer-events: none;
-  view-transition-name: theme-band;
-  background: linear-gradient(to top, transparent, #498fff 30%, #ff7a7a 50%, #ffbc74 70%, transparent);
-  filter: blur(18px);
-  opacity: 0.75;
-  animation: theme-band 1.6s cubic-bezier(0.45, 0, 0.25, 1) both;
-}
-
-::view-transition-old(theme-band) {
-  display: none;
-}
-
-::view-transition-new(theme-band) {
-  animation: none;
-}
-
-@keyframes theme-band {
-  from {
-    translate: 0 135vh;
-  }
-  to {
-    translate: 0 -55vh;
-  }
 }
 
 /* the cat, drawn in the header's text colour so it suits both themes */
@@ -453,17 +416,4 @@ body {
 
 .notch a.notch-logo {
   color: var(--nav-fg);
-}
-
-/* the mobile hero fade sits where both sweeps start (the bottom of the page sweep and the near
-   grass of the scene's wipe), so it eases to the new background early in the switch */
-.hero-fade {
-  view-transition-name: hero-fade;
-}
-
-::view-transition-group(hero-fade),
-::view-transition-old(hero-fade),
-::view-transition-new(hero-fade) {
-  animation-duration: 0.35s;
-  animation-timing-function: ease-out;
 }

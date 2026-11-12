@@ -26,8 +26,8 @@ if (import.meta.env.DEV) {
 }
 
 const fragmentShader = /* glsl */ `
-uniform sampler2D tColor, tDepth, tWire, tFrom;
-uniform float uReveal, uWire, uTime, uNear, uFar, uFromSnap;
+uniform sampler2D tColor, tDepth, tWire;
+uniform float uReveal, uWire, uTime, uNear, uFar;
 uniform vec3 uBg, uLine;
 uniform vec2 uTexel;
 varying vec2 vUv;
@@ -63,17 +63,14 @@ void main() {
   float luma = dot(col, vec3(0.299, 0.587, 0.114));
   col = mix(col, hue(n * 5.0 - uTime * 0.35) * (0.4 + 0.8 * luma), band * 0.8);
 
-  // what the wipe uncovers the scene from: the wireframe (intro) or a still of the old theme
   float wire = texture2D(tWire, vUv).a * uWire;
-  vec3 before = uFromSnap > 0.5 ? texture2D(tFrom, vUv).rgb : mix(uBg, uLine, wire * 0.55);
-  gl_FragColor = vec4(mix(before, col, shown), 1.0);
+  gl_FragColor = vec4(mix(mix(uBg, uLine, wire * 0.55), col, shown), 1.0);
   #include <colorspace_fragment>
 }`
 
 /**
- * Two-pass wipe renderer: the scene in colour (+depth) uncovered by a depth-driven colorama
- * wipe, either from its wireframe (the intro) or from a still of the old theme (a theme
- * switch). Only alive while a wipe plays; otherwise the scene renders directly.
+ * Two-pass intro renderer: the scene in colour (+depth) and as wireframe, blended by a
+ * depth-driven wipe. Only alive until the reveal ends; then the scene renders directly.
  */
 export function createComposite(
   renderer: THREE.WebGLRenderer,
@@ -90,16 +87,12 @@ export function createComposite(
   color.texture.colorSpace = THREE.SRGBColorSpace // 8-bit target: store sRGB, sample linear
   const wire = new THREE.WebGLRenderTarget(size.x, size.y, { depthBuffer: false })
   const wireMat = new THREE.MeshBasicMaterial({ wireframe: true })
-  const from = new THREE.WebGLRenderTarget(size.x, size.y)
-  from.texture.colorSpace = THREE.SRGBColorSpace
 
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       tColor: { value: color.texture },
       tDepth: { value: color.depthTexture },
       tWire: { value: wire.texture },
-      tFrom: { value: from.texture },
-      uFromSnap: { value: 0 },
       uReveal: { value: 0 },
       uWire: { value: 0 },
       uTime: { value: 0 },
@@ -123,24 +116,7 @@ export function createComposite(
     setSize(w: number, h: number) {
       color.setSize(w, h)
       wire.setSize(w, h)
-      from.setSize(w, h)
       mat.uniforms.uTexel.value.set(1 / w, 1 / h)
-    },
-    /** Keep a still of the scene as it is now: the old theme a switch wipes away from. */
-    snapshot() {
-      renderer.setRenderTarget(from)
-      renderer.render(scene, camera)
-      renderer.setRenderTarget(null)
-      mat.uniforms.uFromSnap.value = 1
-    },
-    /** A theme switch: progress 0-1 of the wipe from the snapshot to the live scene. */
-    renderWipe(progress: number, time: number) {
-      renderer.setRenderTarget(color)
-      renderer.render(scene, camera)
-      mat.uniforms.uReveal.value = progress
-      mat.uniforms.uTime.value = time
-      renderer.setRenderTarget(null)
-      renderer.render(quadScene, camera)
     },
     render(t: number) {
       renderer.setRenderTarget(color)
@@ -166,7 +142,6 @@ export function createComposite(
     dispose() {
       color.dispose()
       wire.dispose()
-      from.dispose()
       wireMat.dispose()
       mat.dispose()
       quad.geometry.dispose()

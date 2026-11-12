@@ -908,8 +908,6 @@ export async function createHero(
     ? null
     : createComposite(renderer, scene, camera, notInWire, uBg, uLine)
 
-  let themeWipe: ReturnType<typeof createComposite> | null = null
-  let wipeAt = 0
   let relayout: (() => void) | null = null
   const size = new THREE.Vector2()
   const resize = () => {
@@ -924,7 +922,6 @@ export async function createHero(
     renderer.getDrawingBufferSize(size)
     uRes.value.copy(size)
     comp?.setSize(size.x, size.y)
-    themeWipe?.setSize(size.x, size.y)
     relayout?.()
     dirty = true
   }
@@ -1024,16 +1021,9 @@ export async function createHero(
     last = now
     if (!visible) return
 
-    // A theme switch after the intro plays the same depth colorama wipe, from a still of the
-    // old theme to the new one; during the intro (or with reduced motion) it simply cuts over.
+    // a theme switch cuts straight over; the page's own transition covers it (see theme.ts)
     const target = wantNight()
     if (target !== night) {
-      if (!still && !comp && started) {
-        themeWipe?.dispose()
-        themeWipe = createComposite(renderer, scene, camera, notInWire, uBg, uLine)
-        themeWipe.snapshot()
-        wipeAt = uTime.value
-      }
       night = target
       applyTheme()
       dirty = true
@@ -1145,13 +1135,7 @@ export async function createHero(
       comp.dispose()
       comp = null
     }
-    const wipe = themeWipe ? (uTime.value - wipeAt) / 1.6 : 1
-    if (themeWipe && wipe >= 1) {
-      themeWipe.dispose()
-      themeWipe = null
-    }
     if (comp) comp.render(t)
-    else if (themeWipe) themeWipe.renderWipe(smooth(0, 1, wipe), uTime.value)
     else renderer.render(scene, camera)
   }
   raf = requestAnimationFrame(frame)
@@ -1184,7 +1168,6 @@ export async function createHero(
     canvas.removeEventListener('pointermove', onHover)
     root.removeEventListener('pointerleave', onLeave)
     comp?.dispose()
-    themeWipe?.dispose()
     cables.dispose()
     scene.traverse((o) => {
       const m = o as THREE.Mesh
