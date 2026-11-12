@@ -8,27 +8,19 @@
 :root {
   --bg: #fafafa;
   --fg: #171717;
-  --muted: #737373;
-  --line: #e5e5e5;
+  --nav-bg: #fff;
+  --nav-fg: #0a0a0a;
+  --nav-line: rgb(0 0 0 / 0.1);
   --hero-poster: url("/hero/poster.webp");
 }
 
 :root[data-theme="dark"] {
   --bg: #0a0a0a;
   --fg: #ededed;
-  --muted: #8a8a8a;
-  --line: #262626;
+  --nav-bg: #000;
+  --nav-fg: #fff;
+  --nav-line: rgb(255 255 255 / 0.14);
   --hero-poster: url("/hero/poster-dark.webp");
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #0a0a0a;
-    --fg: #ededed;
-    --muted: #8a8a8a;
-    --line: #262626;
-    --hero-poster: url("/hero/poster-dark.webp");
-  }
 }
 
 body {
@@ -53,6 +45,7 @@ body {
   transition: opacity 300ms ease;
 }
 
+.hero[data-state="wire"] canvas,
 .hero[data-state="ready"] canvas {
   opacity: 1;
 }
@@ -66,4 +59,353 @@ body {
   .hero {
     background: var(--hero-poster) center / cover;
   }
+}
+
+.hero-loader {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  pointer-events: none;
+  transition: background-color 400ms ease;
+}
+
+/* from 75% the count sits over the wireframe, so only its backdrop goes */
+.hero:not([data-state="loading"]) .hero-loader {
+  background: transparent;
+}
+
+.hero-loader-count {
+  font-size: clamp(5rem, 18vw, 14rem);
+  font-weight: 600;
+  letter-spacing: -0.05em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  transition: opacity 250ms ease;
+}
+
+.hero:not([data-state="loading"]):not([data-state="wire"]) .hero-loader-count {
+  opacity: 0;
+}
+
+/* ---- scroll story: a sticky stage that shrinks into a card, then the next section ---- */
+/* pinned while things float and the card forms (60svh + 100px), then the page scrolls normally */
+.scroller {
+  height: calc(160svh + 100px);
+}
+
+.stage {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  background: var(--bg);
+  --card: 0; /* 0 full screen, 1 card; set while scrolling */
+  --card-margin: 60px;
+  --m: calc(var(--card) * var(--card-margin));
+  --b: calc(var(--card) * 48px);
+  --r: calc(var(--card) * 28px);
+}
+
+@media (max-width: 639px) {
+  .stage {
+    --card-margin: 16px;
+  }
+}
+
+.card {
+  position: absolute;
+  inset: 0;
+  clip-path: inset(0 var(--m) var(--b) var(--m) round 0 0 var(--r) var(--r));
+}
+
+/* the soft shadow along the card's bottom edge, falling onto the next section */
+.card-shadow {
+  position: absolute;
+  inset: 0 var(--m) var(--b) var(--m);
+  border-radius: 0 0 var(--r) var(--r);
+  box-shadow: 0 34px 60px -22px rgb(0 0 0 / calc(var(--card) * 0.42));
+  pointer-events: none;
+}
+
+/* on the dark page the shadow is lost, so the card gets a faint rim instead */
+:root[data-theme="dark"] .card-shadow {
+  box-shadow: 0 0 0 1px rgb(255 255 255 / calc(var(--card) * 0.1));
+}
+
+/* the heading lives in the 3D scene; this copy is for screen readers and search, and shows if WebGL fails */
+.title-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.hero[data-state="failed"] + .title-text {
+  inset-inline: 0;
+  top: clamp(1.5rem, 6vh, 4rem);
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+  white-space: normal;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroller {
+    height: 100svh;
+  }
+}
+
+/* ---- header (after getuni.co): a black notch that opens, then its contents fade in ---- */
+.notch {
+  --ease-gentle: linear(0, 0.097, 0.298, 0.514, 0.7, 0.839, 0.933, 0.989, 1.017, 1.028, 1.028, 1.023, 1.017, 1.011, 1.006, 1.003, 1.001, 1);
+  position: fixed;
+  z-index: 50;
+  top: 12px;
+  left: 50%;
+  translate: -50% 0;
+  display: flex;
+  width: min(460px, calc(100vw - 24px));
+  height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 6px 0 9px;
+  border-radius: 16px;
+  /* closed: a 44px pill in the middle, invisible until the heading starts to go */
+  clip-path: inset(0 calc(50% - 22px) round 16px);
+  opacity: 0;
+  transition:
+    clip-path 0.85s var(--ease-gentle),
+    opacity 0.25s ease;
+}
+
+@media (min-width: 768px) {
+  .notch {
+    top: 24px;
+  }
+}
+
+.notch[data-open="true"] {
+  clip-path: inset(0 0 round 16px);
+  opacity: 1;
+}
+
+.notch-item {
+  opacity: 0;
+  transition: opacity 0.2s ease-out;
+}
+
+.notch[data-open="true"] .notch-item {
+  opacity: 1;
+  transition: opacity 0.4s ease-out 0.45s; /* after the notch has mostly opened */
+}
+
+.notch a:not(.notch-cta) {
+  color: color-mix(in srgb, var(--nav-fg) 68%, transparent);
+  text-decoration: none;
+}
+
+.notch a:not(.notch-cta):hover,
+.notch a:not(.notch-cta):focus-visible {
+  color: var(--nav-fg);
+}
+
+.notch-cta {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  padding: 0 14px;
+  border-radius: 10px;
+  background: var(--nav-fg);
+  color: var(--nav-bg);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.notch a:focus-visible {
+  outline: 2px solid var(--nav-fg);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notch,
+  .notch-item,
+  .notch[data-open="true"] .notch-item {
+    transition: none;
+  }
+}
+
+/* the header and the scroll hint share one look: 80% opaque, blurred, with a solid hairline border */
+.glass {
+  background: color-mix(in srgb, var(--nav-bg) 80%, transparent);
+  color: var(--nav-fg);
+  border: 1px solid var(--nav-line);
+  backdrop-filter: blur(14px) saturate(1.4);
+  -webkit-backdrop-filter: blur(14px) saturate(1.4);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.08);
+}
+
+.notch-theme {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font-size: 17px;
+  cursor: pointer;
+}
+
+.notch-theme:hover {
+  background: color-mix(in srgb, var(--nav-fg) 9%, transparent);
+}
+
+.notch-theme:focus-visible {
+  outline: 2px solid var(--nav-fg);
+  outline-offset: 1px;
+}
+
+.theme-moon,
+:root[data-theme="dark"] .theme-sun {
+  display: none;
+}
+
+:root[data-theme="dark"] .theme-moon {
+  display: block;
+}
+
+.scroll-hint {
+  position: absolute;
+  left: 50%;
+  bottom: max(20px, env(safe-area-inset-bottom));
+  translate: -50% 12px;
+  display: flex;
+  height: 36px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px 0 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s ease, translate 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.scroll-hint[data-show="true"] {
+  opacity: 1;
+  translate: -50% 0;
+}
+
+.scroll-hint-icon {
+  font-size: 16px;
+  animation: hint-bob 1.6s ease-in-out infinite;
+}
+
+@keyframes hint-bob {
+  50% {
+    transform: translateY(3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-hint,
+  .scroll-hint-icon {
+    transition: none;
+    animation: none;
+  }
+}
+
+/* ---- theme switch, site-wide: the new theme sweeps up from the bottom (see theme.ts) ---- */
+::view-transition-old(root) {
+  animation: none;
+}
+
+::view-transition-new(root) {
+  mask-image: linear-gradient(to top, #000 45%, transparent 55%);
+  mask-size: 100% 300%;
+  mask-repeat: no-repeat;
+  animation: theme-sweep 1.6s cubic-bezier(0.45, 0, 0.25, 1) both;
+}
+
+@keyframes theme-sweep {
+  from {
+    mask-position: 0 0%;
+  }
+  to {
+    mask-position: 0 100%;
+  }
+}
+
+/* the header is captured on its own (its blur would otherwise drop out of the page snapshot) */
+.notch {
+  view-transition-name: site-nav;
+}
+
+/* the scene does its own depth wipe, so it is shown live and not swept */
+.card {
+  view-transition-name: scene;
+}
+
+::view-transition-old(scene) {
+  display: none;
+}
+
+::view-transition-new(scene) {
+  animation: none;
+}
+
+/* the colour band riding the edge of the sweep */
+.theme-band {
+  position: fixed;
+  inset-inline: 0;
+  top: 0;
+  height: 22vh;
+  pointer-events: none;
+  view-transition-name: theme-band;
+  background: linear-gradient(to top, transparent, #498fff 30%, #ff7a7a 50%, #ffbc74 70%, transparent);
+  filter: blur(18px);
+  opacity: 0.75;
+  animation: theme-band 1.6s cubic-bezier(0.45, 0, 0.25, 1) both;
+}
+
+::view-transition-old(theme-band) {
+  display: none;
+}
+
+::view-transition-new(theme-band) {
+  animation: none;
+}
+
+@keyframes theme-band {
+  from {
+    translate: 0 135vh;
+  }
+  to {
+    translate: 0 -55vh;
+  }
+}
+
+/* the cat, drawn in the header's text colour so it suits both themes */
+.notch-logo {
+  width: 32px;
+  height: 27px;
+  flex-shrink: 0;
+  background: currentColor;
+  mask: url("/logo.svg") center / contain no-repeat;
+}
+
+.notch a.notch-logo {
+  color: var(--nav-fg);
 }
