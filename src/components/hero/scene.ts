@@ -544,9 +544,8 @@ export async function createHero(
   })
   // x, z, scale, model
   for (const [x, z, s, kind] of [
-    [-12.5, -14, 0.52, 0], [-5.5, -16.5, 0.5, 1], [-3.2, -13.5, 0.5, 0], // hill A
+    [-12.5, -14, 0.52, 0], [-5.5, -16.5, 0.5, 1], // hill A
     [7.5, -26.5, 0.62, 0], [11.5, -25.5, 0.6, 1], [14, -27.5, 0.55, 0], // hill B
-    [2.5, -42, 0.7, 1], // far off, in the dip between them
   ]) {
     const model = cypress[kind].clone()
     model.material = treeMat
@@ -917,8 +916,8 @@ export async function createHero(
     renderer.setPixelRatio(Math.min(devicePixelRatio, desktop ? 2 : 1.5))
     renderer.setSize(w, h, false)
     camera.aspect = w / h
-    // slide the picture down so the title has sky to sit on
-    camera.setViewOffset(w, h, 0, -Math.round(h * (w < h ? 0.08 : 0.07)), w, h)
+    // slide the picture down so the title has sky to sit on; px floor for short laptop screens
+    camera.setViewOffset(w, h, 0, -Math.round(w < h ? h * 0.08 : Math.max(h * 0.07, 105)), w, h)
     renderer.getDrawingBufferSize(size)
     uRes.value.copy(size)
     comp?.setSize(size.x, size.y)
