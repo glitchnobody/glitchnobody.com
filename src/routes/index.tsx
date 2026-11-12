@@ -37,7 +37,7 @@ function App() {
 
   useEffect(() => {
     const still = matchMedia('(prefers-reduced-motion: reduce)').matches
-    // touch screens: the hero is a fixed 600px block that simply scrolls away (no pinning, no card),
+    // touch screens: the hero is a fixed 800px block that simply scrolls away (no pinning, no card),
     // and the float plays out as it goes
     const touch = !matchMedia('(hover: hover) and (pointer: fine)').matches
     let raf = 0
@@ -100,6 +100,7 @@ function App() {
           <div className="card-shadow" />
           <div className="card">
             <HeroScene onStage={setStage} scroll={scroll} />
+            <div className="hero-fade" aria-hidden="true" />
             <div ref={hintEl} data-show="false" className="scroll-hint glass" aria-hidden="true">
               Scroll to view
               <Icon icon={chevronDown} className="scroll-hint-icon" />
