@@ -37,7 +37,8 @@ function App() {
 
   useEffect(() => {
     const still = matchMedia('(prefers-reduced-motion: reduce)').matches
-    // touch screens skip the float: the card forms straight away and the page scrolls on
+    // touch screens: the hero is a fixed 600px block that simply scrolls away (no pinning, no card),
+    // and the float plays out as it goes
     const touch = !matchMedia('(hover: hover) and (pointer: fine)').matches
     let raf = 0
     let last = performance.now()
@@ -52,15 +53,16 @@ function App() {
       // Pinned: the first 60% of a screen floats things to 40% and moves the camera, which hides the
       // heading behind the hills. Then the card forms over 100px, and the rest of the float plays
       // out while the card forms and scrolls away.
-      const floatPx = touch ? 0 : innerHeight * 0.6
-      const raw =
-        scrolled < floatPx
+      const floatPx = innerHeight * 0.6
+      const raw = touch
+        ? clamp01(scrolled / 320) // done while most of the hero is still on screen
+        : scrolled < floatPx
           ? CARD_AT * (scrolled / floatPx)
           : CARD_AT + (1 - CARD_AT) * clamp01((scrolled - floatPx) / (100 + innerHeight * 0.5))
       scroll.smooth += (raw - scroll.smooth) * (1 - Math.exp(-dt * 7))
       if (Math.abs(raw - scroll.smooth) < 0.0004) scroll.smooth = raw
       // the card forms over the 100px after the float; with reduced motion it is simply a card
-      const t = still ? 1 : clamp01((scrolled - floatPx) / 100)
+      const t = touch ? 0 : still ? 1 : clamp01((scrolled - floatPx) / 100)
       st.style.setProperty('--card', String(t * t * (3 - 2 * t)))
       // the header opens out of the notch as the heading reveals, then stays
       if (navEl.current) navEl.current.dataset.open = String(stage === 'reveal' || stage === 'done')

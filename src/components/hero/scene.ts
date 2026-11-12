@@ -1038,10 +1038,7 @@ export async function createHero(
       applyTheme()
       dirty = true
     }
-    // On touch screens the scene holds still once the page scrolls (it only shrinks into the card),
-    // so stop drawing it then: scrolling stays smooth on phones. A theme wipe still plays.
-    const parked = !desktop && finished && window.scrollY > 0 && !themeWipe
-    if ((still || parked) && !dirty && warm <= 0) return
+    if (still && !dirty && warm <= 0) return
     dirty = false
     warm--
 
@@ -1060,7 +1057,7 @@ export async function createHero(
     }
 
     // scrolling: the camera climbs, the heading sinks behind the hills, the parts float away
-    const sRaw = clamp01(still || !desktop ? 0 : opts.scroll.smooth)
+    const sRaw = clamp01(still ? 0 : opts.scroll.smooth)
     const s = sRaw * sRaw * (3 - 2 * sRaw)
     ground.uShadowMix.value = s
     const time = uTime.value
