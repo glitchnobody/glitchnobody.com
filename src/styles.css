@@ -23,6 +23,13 @@
   --hero-poster: url("/hero/poster-dark.webp");
 }
 
+/* keep the scrollbar's space reserved, so locking scroll during the intro (and unlocking it
+   after) never changes the page width, which would resize the 3D canvas mid-animation */
+html {
+  scrollbar-gutter: stable;
+  background: var(--bg);
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -153,6 +160,13 @@ body {
   clip-path: none;
   white-space: normal;
   text-align: center;
+}
+
+/* touch screens: no float, so the page only holds while the card forms */
+@media not ((hover: hover) and (pointer: fine)) {
+  .scroller {
+    height: calc(100svh + 100px);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

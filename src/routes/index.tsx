@@ -37,6 +37,8 @@ function App() {
 
   useEffect(() => {
     const still = matchMedia('(prefers-reduced-motion: reduce)').matches
+    // touch screens skip the float: the card forms straight away and the page scrolls on
+    const touch = !matchMedia('(hover: hover) and (pointer: fine)').matches
     let raf = 0
     let last = performance.now()
     const tick = (now: number) => {
@@ -50,7 +52,7 @@ function App() {
       // Pinned: the first 60% of a screen floats things to 40% and moves the camera, which hides the
       // heading behind the hills. Then the card forms over 100px, and the rest of the float plays
       // out while the card forms and scrolls away.
-      const floatPx = innerHeight * 0.6
+      const floatPx = touch ? 0 : innerHeight * 0.6
       const raw =
         scrolled < floatPx
           ? CARD_AT * (scrolled / floatPx)
