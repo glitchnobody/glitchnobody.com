@@ -48,9 +48,9 @@ export default function HeroScene({ onStage, scroll }: { onStage: (stage: Stage)
     // The SSR branch is constant-folded away, which keeps pixi.js out of the Worker bundle.
     ;(import.meta.env.SSR ? Promise.reject(new Error('client only')) : import('./scene'))
       .then((m) => {
-        target = 7.5
+        target = 25 // the code is in; the model downloads from here
         return m.createHero(canvas.current!, {
-          onProgress: (p) => (target = Math.max(target, 75 * (0.1 + 0.9 * p))),
+          onProgress: (p) => (target = Math.max(target, 25 + 50 * p)),
           onStage: (s) => onStage(s),
           scroll,
         })

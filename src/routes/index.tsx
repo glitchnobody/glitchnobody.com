@@ -7,7 +7,11 @@ import ThemeToggle from '../components/ThemeToggle'
 import { chevronDown, moon, sun } from '../components/icons'
 import { toggleTheme } from '../components/theme'
 
-export const Route = createFileRoute('/')({ component: App })
+export const Route = createFileRoute('/')({
+  // the 3D model starts downloading with the page, not once the scene's code has loaded
+  head: () => ({ links: [{ rel: 'preload', href: '/hero/scene.glb', as: 'fetch', crossOrigin: 'anonymous' }] }),
+  component: App,
+})
 
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x))
 // how far the float has got when the card starts to form (the heading in scene.ts has sunk by then)

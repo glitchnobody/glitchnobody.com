@@ -95,6 +95,21 @@ function slopeLit(x: number, z: number) {
   const nz = hill(x, z - e) - hill(x, z + e)
   return smooth(0.1, 0.6, (nx * SUN[0] + 2 * e * SUN[1] + nz * SUN[2]) / Math.hypot(nx, 2 * e, nz))
 }
+/** f sampled on a grid once, then read bilinearly: for terrain values asked for per grass blade. */
+function gridded(f: (x: number, z: number) => number, x0: number, x1: number, z0: number, z1: number, step: number) {
+  const nx = Math.ceil((x1 - x0) / step) + 1
+  const nz = Math.ceil((z1 - z0) / step) + 1
+  const v = new Float32Array(nx * nz)
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) v[j * nx + i] = f(x0 + i * step, z0 + j * step)
+  return (x: number, z: number) => {
+    const fx = Math.min(nx - 1.001, Math.max(0, (x - x0) / step))
+    const fz = Math.min(nz - 1.001, Math.max(0, (z - z0) / step))
+    const i = Math.floor(fx)
+    const j = Math.floor(fz)
+    const k = j * nx + i
+    return lerp(lerp(v[k], v[k + 1], fx - i), lerp(v[k + nx], v[k + nx + 1], fx - i), fz - j)
+  }
+}
 // Value noise on the CPU, used to grow the meadow in clumps.
 const hash2 = (x: number, z: number) => {
   const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453
@@ -282,22 +297,29 @@ function bakeShadow(model: Container3D, stays: (m: Mesh3D) => boolean) {
     g.fillStyle = '#fff'
     g.fillRect(0, 0, S, S)
     g.fillStyle = '#000'
-    const at = (p: V3) => {
-      const k = p[1] / SUN[1] // slide down along the sun's rays onto the ground
-      return [((p[0] - SUN[0] * k - rect[0]) / rect[2]) * S, ((p[2] - SUN[2] * k - rect[1]) / rect[3]) * S] as const
-    }
+    // one short path per batch: a single path of every triangle gets slow to build and fill
+    let n = 0
     g.beginPath()
-    trianglesOf(model, (a, b, cc, mesh) => {
-      if (!keep(mesh)) return
-      const [p, q, r] = [at(a), at(b), at(cc)]
-      g.moveTo(p[0], p[1])
-      g.lineTo(q[0], q[1])
-      g.lineTo(r[0], r[1])
-      g.closePath()
-    })
-    g.fill('nonzero')
+    for (const t of flat) {
+      if (!keep(t.mesh)) continue
+      g.moveTo(t.p[0], t.p[1]) // fill closes each triangle itself
+      g.lineTo(t.p[2], t.p[3])
+      g.lineTo(t.p[4], t.p[5])
+      if (++n % 1000 === 0) {
+        g.fill()
+        g.beginPath()
+      }
+    }
+    g.fill()
     return c
   }
+  // flattened once along the sun's rays onto the ground, in canvas pixels, for both channels
+  const at = (p: V3) => {
+    const k = p[1] / SUN[1]
+    return [((p[0] - SUN[0] * k - rect[0]) / rect[2]) * S, ((p[2] - SUN[2] * k - rect[1]) / rect[3]) * S]
+  }
+  const flat: Array<{ mesh: Mesh3D; p: number[] }> = []
+  trianglesOf(model, (a, b, cc, mesh) => flat.push({ mesh, p: [...at(a), ...at(b), ...at(cc)] }))
   const all = draw(() => true)
   const stay = draw(stays)
   const out = document.createElement('canvas')
@@ -500,7 +522,13 @@ export async function createHero(
   const ports = new Map<string, V3>()
   for (const n of json.nodes) if (n.extras?.port) ports.set(n.name, n.extras.port)
   const source = await Assets.load<Scene3DSource>('/hero/scene.glb')
-  opts.onProgress(0.85)
+  // the build below is synchronous; between its heavy steps, let the page paint so the loader
+  // keeps counting instead of freezing
+  const breathe = (p: number) => {
+    opts.onProgress(p)
+    return new Promise((r) => setTimeout(r, 0))
+  }
+  await breathe(0.85)
   const model = new Model3D({ source, castShadow: false, receiveShadow: false })
   view.root.addChild(model)
   const catPath = /<path d="([^"]+)"/.exec(catSvg)?.[1] ?? null
@@ -546,6 +574,8 @@ export async function createHero(
   // ---- shadows: drawn once, then they are just a texture ----
   const shadow = bakeShadow(model, (m) => !isFloating(m))
   const shadowFields = { uShRect: shadow.rect }
+
+  await breathe(0.9)
 
   // ---- desk + monitors: toon materials with outlines ----
   // outlines: an inverted hull per part, pushed out a fixed number of pixels in clip space
@@ -718,19 +748,27 @@ export async function createHero(
       size: count,
       instanceData: { a: { value: [0, 0, 0, 0], type: 'vec4<f32>' }, b: { value: [0, 0, 0, 0], type: 'vec4<f32>' } },
     })
-    const m = new Matrix4()
+    for (let i = 0; i < count; i++) {
+      mesh.setGeometryAt(i, geo)
+      mesh.setMaterialAt(i, mat)
+      mesh.setPassesAt(i, RenderPassBit.OPAQUE)
+    }
+    // then matrices and per-copy data straight into the batch's arrays, uploaded once
+    const mats = mesh.matrices
+    const data = mesh.instanceData
     const root = new Float32Array(3)
     const a = new Float32Array(4)
     const b = new Float32Array(4)
     for (let i = 0; i < count; i++) {
       fill(i, root, a, b)
-      mesh.setGeometryAt(i, geo)
-      mesh.setMaterialAt(i, mat)
-      mesh.setMatrixAt(i, m.makeTranslation(root[0], root[1], root[2]))
-      mesh.setInstanceDataAt(i, 'a', a[0], a[1], a[2], a[3])
-      mesh.setInstanceDataAt(i, 'b', b[0], b[1], b[2], b[3])
-      mesh.setPassesAt(i, RenderPassBit.OPAQUE)
+      const o = mats.offset + i * mats.stride // column-major: identity, then the translation
+      mats.data.set([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, root[0], root[1], root[2], 1], o)
+      const d = data.offset + i * data.stride
+      data.data.set(a, d + data.fields.a)
+      data.data.set(b, d + data.fields.b)
     }
+    mats.update()
+    data.update()
     return mesh
   }
   // A point inside the wedge the cameras can see, between two depths. `patch` is the
@@ -739,7 +777,7 @@ export async function createHero(
     for (;;) {
       const z = lerp(z0, z1, rand())
       const x = (rand() * 2 - 1) * Math.min(1.5 + (10.5 - z) * 0.68, 38)
-      if (rand() < 0.25 + 0.75 * noise2(x * patch + 40, z * patch)) return [x, hill(x, z), z]
+      if (rand() < 0.25 + 0.75 * noise2(x * patch + 40, z * patch)) return [x, heightAt(x, z), z]
     }
   }
 
@@ -750,6 +788,10 @@ export async function createHero(
     { color: rgb('#e5532d'), petals: 6 }, // poppy, echoing the desk
     { color: rgb('#b99be6'), petals: 5 },
   ]
+  // slope light per blade: slopeLit already looks 0.5 m either side, so a 0.5 m grid loses nothing
+  const slope = gridded(slopeLit, -39, 39, -45, 7, 0.5)
+  const heightAt = gridded(hill, -39, 39, -45, 7, 0.5) // finer than the soil mesh the blades stand on
+  if (import.meta.env.DEV) console.assert(Math.abs(slope(3.3, -12.7) - slopeLit(3.3, -12.7)) < 0.05, 'slope grid')
   const blooms = Array.from({ length: desktop ? 6000 : 2000 }, () => {
     const [x, y, z] = spot(6.5, -22, 0.3)
     const far = 1 + Math.max(0, -z - 4) / 12 // grow with distance so they stay visible
@@ -816,7 +858,7 @@ export async function createHero(
       const f = blooms[i]
       r.set([f.x, f.y, f.z])
       a.set([f.stem, rand() * Math.PI, f.rnd, 0.006])
-      b.set([0, 0, slopeLit(f.x, f.z), 0]) // straight and green
+      b.set([0, 0, slope(f.x, f.z), 0]) // straight and green
       return
     }
     let n = i - blooms.length
@@ -827,7 +869,7 @@ export async function createHero(
     r.set([x, y, z])
     a.set([height, rand() * Math.PI, rand(), (0.009 + rand() * 0.009) * band.wide * coarse * (seed ? 0.6 : 1)])
     // dryness, how far the blade arcs over, slope light
-    b.set([seed ? 1 : rand() < 0.14 ? 0.5 + rand() * 0.5 : rand() * 0.15, 0.15 + rand() * 0.5, slopeLit(x, z), 0])
+    b.set([seed ? 1 : rand() < 0.14 ? 0.5 + rand() * 0.5 : rand() * 0.15, 0.15 + rand() * 0.5, slope(x, z), 0])
   })
 
   const flowerMat = bind(
@@ -885,6 +927,8 @@ export async function createHero(
     b.set([...f.kind.color, 0])
   })
   view.root.addChild(grass, flowers)
+
+  await breathe(0.95)
 
   // ---- steam off the coffee: one billboard with a scrolling-noise wisp ----
   const steamMat = bind(
@@ -1391,3 +1435,4 @@ export async function createHero(
     },
   }
 }
+
