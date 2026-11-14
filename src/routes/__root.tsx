@@ -1,6 +1,7 @@
 import {
   HeadContent,
   Scripts,
+  Link,
   createRootRoute,
 } from '@tanstack/react-router'
 import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
@@ -57,7 +58,22 @@ export const Route = createRootRoute({
     ],
   }),
   shellComponent: RootDocument,
+  notFoundComponent: NotFound,
 })
+
+function NotFound() {
+  return (
+    <main className="grid min-h-svh place-items-center px-4 text-center">
+      <div>
+        <p className="text-sm font-medium opacity-60">404</p>
+        <h1 className="mt-2 text-4xl font-semibold tracking-tight">This page doesn’t exist</h1>
+        <Link to="/" className="mt-6 inline-block underline underline-offset-4">
+          Back to GlitchNobody
+        </Link>
+      </div>
+    </main>
+  )
+}
 
 function RootDocument({ children }: { children: React.ReactNode }) {
   return (

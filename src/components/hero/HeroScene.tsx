@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 export type Stage = 'loading' | 'wire' | 'reveal' | 'done'
 
-// three.js is imported inside the effect so it stays out of the SSR bundle and the
+// The 3D scene (PixiJS 3D) is imported inside the effect so it stays out of the SSR bundle and the
 // first-paint chunk.
 //
 // Sequence: the count runs 0-75% while the scene loads. At 75% the wireframe fades in under the
@@ -45,7 +45,7 @@ export default function HeroScene({ onStage, scroll }: { onStage: (stage: Stage)
     }
     let raf = requestAnimationFrame(tick)
 
-    // The SSR branch is constant-folded away, which keeps three.js out of the Worker bundle.
+    // The SSR branch is constant-folded away, which keeps pixi.js out of the Worker bundle.
     ;(import.meta.env.SSR ? Promise.reject(new Error('client only')) : import('./scene'))
       .then((m) => {
         target = 7.5

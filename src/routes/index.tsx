@@ -10,7 +10,7 @@ import { toggleTheme } from '../components/theme'
 export const Route = createFileRoute('/')({ component: App })
 
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x))
-// how far the float has got when the card starts to form (keep in step with HEADING_GONE in scene.ts)
+// how far the float has got when the card starts to form (the heading in scene.ts has sunk by then)
 const CARD_AT = 0.4
 
 function App() {

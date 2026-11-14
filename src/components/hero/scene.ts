@@ -1,28 +1,57 @@
-import * as THREE from 'three'
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
-import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
+import { Application, Assets, Color, Texture } from 'pixi.js'
+import {
+  BatchedMesh3D,
+  FlatMaterial,
+  Geometry3D,
+  Matrix4,
+  Mesh3D,
+  Model3D,
+  PlaneGeometry,
+  RenderPassBit,
+  SphereGeometry,
+  View3D,
+  getAttributeData,
+} from '@pixi/3d'
+import type { BaseMaterial3D, Container3D, Scene3DSource, ShaderBit } from '@pixi/3d'
 import { toggleTheme } from '../theme'
 import catSvg from './cat.svg?raw' // the favicon artwork; its silhouette is drawn on the PC's screen
 import { createCables } from './cables'
 import type { Port } from './cables'
-import { REVEAL_END, REVEAL_START, TITLE_AT, ZOOM_END, createComposite, zoom } from './intro'
+import { HELPERS, REVEAL_END, REVEAL_START, TITLE_AT, ZOOM_END, reveal, revealBit, wireFade, wireMaterial, zoom } from './intro'
 
+type V3 = [number, number, number]
 const FOV = 35
 // Camera poses, looking down into the valley so the frame is mostly ground.
 // `need` is the scene width (m) that must stay in frame on narrow screens.
-const WIDE = { pos: new THREE.Vector3(0, 3.7, 12.6), tgt: new THREE.Vector3(0, 1.1, 0), need: 3.4 }
-const CLOSE = { pos: new THREE.Vector3(0, 2.6, 6.9), tgt: new THREE.Vector3(0, 1.15, 0), need: 2.9 }
+const WIDE = { pos: [0, 3.7, 12.6] as V3, tgt: [0, 1.1, 0] as V3, need: 3.4 }
+const CLOSE = { pos: [0, 2.6, 6.9] as V3, tgt: [0, 1.15, 0] as V3, need: 2.9 }
 // Scrolling carries the camera from CLOSE, through SKY_MID, to SKY: it lowers a little while tilting
 // up to follow the monitors as they float.
-const SKY_MID = { pos: new THREE.Vector3(0, 2.4, 7.0), tgt: new THREE.Vector3(0, 1.5, 0), need: 3.4 }
-const SKY = { pos: new THREE.Vector3(0, 2.15, 7.0), tgt: new THREE.Vector3(0, 1.9, 0), need: 3.6 }
+const SKY_MID = { pos: [0, 2.4, 7.0] as V3, tgt: [0, 1.5, 0] as V3, need: 3.4 }
+const SKY = { pos: [0, 2.15, 7.0] as V3, tgt: [0, 1.9, 0] as V3, need: 3.6 }
 const TITLE_Z = -34 // the heading hangs here, behind both hills
 
+const tanHalf = Math.tan((FOV * Math.PI) / 360)
+
+const norm = (v: V3): V3 => {
+  const l = Math.hypot(...v)
+  return [v[0] / l, v[1] / l, v[2] / l]
+}
 // Low sun, from the left and a little in front.
-const SUN = new THREE.Vector3(-5, 2.8, 3.4).normalize()
+const SUN = norm([-5, 2.8, 3.4])
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x))
+const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+const dot = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+const mix3 = (a: V3, b: V3, t: number): V3 => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
+/** A point through a 4x4 column-major matrix (pixi's Matrix4 elements). */
+const xform = (m: ArrayLike<number>, x: number, y: number, z: number): V3 => [
+  m[0] * x + m[4] * y + m[8] * z + m[12],
+  m[1] * x + m[5] * y + m[9] * z + m[13],
+  m[2] * x + m[6] * y + m[10] * z + m[14],
+]
 
 /** CSS cubic-bezier(x1, y1, x2, y2) evaluated at time x, by Newton's method. */
 function cubicBezier(x1: number, y1: number, x2: number, y2: number, x: number) {
@@ -64,7 +93,7 @@ function slopeLit(x: number, z: number) {
   const e = 0.5
   const nx = hill(x - e, z) - hill(x + e, z)
   const nz = hill(x, z - e) - hill(x, z + e)
-  return smooth(0.1, 0.6, (nx * SUN.x + 2 * e * SUN.y + nz * SUN.z) / Math.hypot(nx, 2 * e, nz))
+  return smooth(0.1, 0.6, (nx * SUN[0] + 2 * e * SUN[1] + nz * SUN[2]) / Math.hypot(nx, 2 * e, nz))
 }
 // Value noise on the CPU, used to grow the meadow in clumps.
 const hash2 = (x: number, z: number) => {
@@ -79,68 +108,25 @@ function noise2(x: number, z: number) {
   return lerp(lerp(hash2(xi, zi), hash2(xi + 1, zi), u), lerp(hash2(xi, zi + 1), hash2(xi + 1, zi + 1), u), v)
 }
 
-// The GLSL chunks below build on each other: NOISE, then POOL / SHADOW, then GROUND and WIND.
-const NOISE = /* glsl */ `
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float vnoise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
-             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}`
+// ---- shader pieces ----
+// Colours reach the shaders as authored (sRGB) and are linearised there with hzL(); results go out
+// through hzOut(), which works whatever colour space pixi runs the material in.
+const v3 = 'vec3<f32>' as const
+const f1 = 'f32' as const
+const GROUND_FIELDS = { uDeep: v3, uMid: v3, uSun: v3, uShadeA: v3, uShadeB: v3, uAir: v3, uGlow: v3, uTip: v3, uDry: v3, uShadowMix: f1, uShRect: 'vec4<f32>' as const }
+const GROUND_ARGS = 'hzL(material.uDeep), hzL(material.uMid), hzL(material.uSun), hzL(material.uShadeA), hzL(material.uShadeB), hzL(material.uGlow)'
+const WIND_FIELDS = { uT: f1, uShake: f1, uPointer: v3 }
+const WIND_ARGS = 'material.uT, material.uShake, material.uPointer'
+// 1 = open, 0 = in the shadow of the desk and monitors (baked once, see bakeShadow)
+const shadowAt = (wp: string) =>
+  `hzShadow(sampleShadowDirect(hzShadowUV(${wp}.xz, material.uShRect)).rg, material.uShadowMix)`
 
-// 1 where sunlight reaches the ground, 0 in shade (p = world xz).
-const POOL = /* glsl */ `
-float pool(vec2 p) {
-  vec2 q = (p - vec2(0.9, 0.3)) / vec2(6.5, 3.0);
-  q.x += q.y * 0.35;
-  float desk = 1.0 - smoothstep(0.45, 1.1, length(q) + (vnoise(p * 0.45) - 0.5) * 0.5);
-  float patches = 0.75 * smoothstep(0.56, 0.74, vnoise(p * 0.07 + 3.7)) * smoothstep(8.0, 13.0, length(p)); // on the hills
-  return max(desk, patches);
-}`
-
-// 1 = open, 0 = in the shadow of the desk and monitors (rendered once from the sun's direction).
-const SHADOW = /* glsl */ `
-uniform sampler2D uShadow; // r: shadow of everything, g: shadow of the desk and ground monitors only
-uniform mat4 uShadowMat;
-uniform float uShadowMix;  // 0 everything is on the desk, 1 it has all floated away
-float shadowAt(vec3 wp) {
-  vec2 uv = (uShadowMat * vec4(wp, 1.0)).xy * 0.5 + 0.5;
-  const float r = 0.012;
-  vec2 s = (texture2D(uShadow, uv).rg * 2.0
-          + texture2D(uShadow, uv + vec2(r, 0.0)).rg + texture2D(uShadow, uv - vec2(r, 0.0)).rg
-          + texture2D(uShadow, uv + vec2(0.0, r)).rg + texture2D(uShadow, uv - vec2(0.0, r)).rg) / 6.0;
-  return mix(s.r, s.g, uShadowMix);
-}`
-
-// Meadow colour at a world position; shared by the ground, every blade and the flowers.
-const GROUND = /* glsl */ `
-uniform vec3 uDeep, uMid, uSun, uShadeA, uShadeB, uAir, uGlow, uTip, uDry;
-// lit: how far the slope faces the sun; pl: pool(); sh: shadowAt()
-vec3 groundColor(vec3 wp, float lit, float pl, float sh) {
-  vec2 p = wp.xz;
-  float n = vnoise(p * 0.35) * 0.65 + vnoise(p * 1.3 + 7.0) * 0.35;
-  vec3 sunny = mix(mix(uDeep, uMid, smoothstep(0.25, 0.55, n)), uSun, smoothstep(0.5, 0.8, n));
-  vec3 shade = mix(uShadeA, uShadeB, smoothstep(0.3, 0.7, n));
-  vec3 c = mix(shade, sunny, pl) * mix(0.7, 1.15, lit) * mix(0.5, 1.0, sh);
-  vec2 g = p - vec2(0.0, 0.9);                                   // CRT glow (night only)
-  return c + uGlow * exp(-dot(g, g) * 0.9);
-}
-// distance haze: this is what separates the far hill from the near one
-float airAt(vec3 wp) { return smoothstep(8.0, 48.0, -wp.z) * 0.55; }
-vec3 air(vec3 c, vec3 wp) { return mix(c, uAir, airAt(wp)); }`
-
-const WIND = /* glsl */ `
-uniform float uTime, uShake;
-uniform vec3 uPointer;
-// xz sway for a point rooted at 'root'; rnd in 0..1
-vec2 sway(vec3 root, float rnd) {
-  float gust = vnoise(root.xz * 0.16 - vec2(uTime * 0.55, uTime * 0.12)); // bands of wind crossing the meadow
-  float flutter = sin(uTime * 3.1 + rnd * 40.0 + root.x * 2.0) * 0.12;
-  float k = uShake * (1.0 - smoothstep(0.0, 1.3, distance(root.xz, uPointer.xz)));
-  vec2 shake = vec2(sin(uTime * 16.0 + rnd * 40.0), cos(uTime * 19.0 + rnd * 23.0)) * k * 0.3;
-  return vec2(0.08 + gust * 0.5 + flutter, gust * 0.12) + shake;
-}`
+/** A material bit; `gl` holds the GLSL code for each slot. WebGL only (see the app's `preference`). */
+const bit = (name: string, b: Omit<ShaderBit, 'name'>): ShaderBit => ({
+  name,
+  requires: [HELPERS],
+  ...b,
+})
 
 /**
  * One texture for every lit screen: 4x2 cells that match the atlas UVs baked into the model.
@@ -179,9 +165,11 @@ function screenAtlas(catPath: string | null) {
   g.fillStyle = 'rgba(0,0,0,0.16)' // scanlines
   for (let y = 0; y < H * 2; y += 2) g.fillRect(0, y, W * 4, 1)
 
-  const tex = new THREE.CanvasTexture(c)
-  tex.colorSpace = THREE.SRGBColorSpace
-  tex.flipY = false // glTF UV convention
+  const tex = Texture.from(c)
+  // no mipmaps (they would bleed one cell into the next), crisp pixels up close
+  tex.source.style.magFilter = 'nearest'
+  tex.source.style.update()
+  const changed = () => tex.source.update()
 
   // The cat: the favicon silhouette, with its spiral eyes redrawn so they can look around and
   // blink. lx/ly: where it looks, -1..1 (ly positive = down). open: 1 eyes open, 0 shut.
@@ -219,7 +207,7 @@ function screenAtlas(catPath: string | null) {
     g.restore()
     g.fillStyle = 'rgba(0,0,0,0.16)'
     for (let yy = y; yy < y + H; yy += 2) g.fillRect(x, yy, W, 1)
-    tex.needsUpdate = true
+    changed()
   }
   drawCat(0, 0, 1)
 
@@ -257,13 +245,79 @@ function screenAtlas(catPath: string | null) {
     g.fillStyle = 'rgba(0,0,0,0.16)'
     for (let yy = y; yy < y + H; yy += 2) g.fillRect(x, yy, W, 1)
     g.restore()
-    tex.needsUpdate = true
+    changed()
   }
   drawThemeIcon(document.documentElement.dataset.theme === 'dark')
-  tex.magFilter = THREE.NearestFilter
-  tex.minFilter = THREE.LinearFilter // no mipmaps: they would bleed one cell into the next
-  tex.generateMipmaps = false
+
   return { tex, drawCat, drawThemeIcon }
+}
+
+/** World-space triangles of every mesh under a node. */
+function trianglesOf(root: Container3D, each: (a: V3, b: V3, c: V3, mesh: Mesh3D) => void) {
+  root.traverse((o) => {
+    if (!(o instanceof Mesh3D) || !o.geometry) return
+    const p = getAttributeData(o.geometry, 'aPosition', 3)
+    const m = o.getGlobalTransform().elements
+    const w = (i: number) => xform(m, p[i * 3], p[i * 3 + 1], p[i * 3 + 2])
+    const idx = o.geometry.indices
+    const n = idx ? idx.length : p.length / 3
+    for (let i = 0; i + 2 < n; i += 3) {
+      each(w(idx ? idx[i] : i), w(idx ? idx[i + 1] : i + 1), w(idx ? idx[i + 2] : i + 2), o)
+    }
+  })
+}
+
+/**
+ * The desk's shadow on the ground, drawn once on a canvas by flattening every triangle along the
+ * sun's direction. r: shadow of everything, g: shadow of the parts that stay, so shadows fade as
+ * things float off. `rect` is the ground area it covers (x0, z0, width, depth).
+ */
+function bakeShadow(model: Container3D, stays: (m: Mesh3D) => boolean) {
+  const S = 512
+  const rect = [-3, -5, 8, 8] as const
+  const draw = (keep: (m: Mesh3D) => boolean) => {
+    const c = document.createElement('canvas')
+    c.width = c.height = S
+    const g = c.getContext('2d')!
+    g.fillStyle = '#fff'
+    g.fillRect(0, 0, S, S)
+    g.fillStyle = '#000'
+    const at = (p: V3) => {
+      const k = p[1] / SUN[1] // slide down along the sun's rays onto the ground
+      return [((p[0] - SUN[0] * k - rect[0]) / rect[2]) * S, ((p[2] - SUN[2] * k - rect[1]) / rect[3]) * S] as const
+    }
+    g.beginPath()
+    trianglesOf(model, (a, b, cc, mesh) => {
+      if (!keep(mesh)) return
+      const [p, q, r] = [at(a), at(b), at(cc)]
+      g.moveTo(p[0], p[1])
+      g.lineTo(q[0], q[1])
+      g.lineTo(r[0], r[1])
+      g.closePath()
+    })
+    g.fill('nonzero')
+    return c
+  }
+  const all = draw(() => true)
+  const stay = draw(stays)
+  const out = document.createElement('canvas')
+  out.width = out.height = S
+  const g = out.getContext('2d')!
+  // soften the edges, as the old shadow map's five taps did
+  g.filter = 'blur(5px)'
+  g.drawImage(all, 0, 0)
+  const r = g.getImageData(0, 0, S, S)
+  g.clearRect(0, 0, S, S)
+  g.drawImage(stay, 0, 0)
+  const s = g.getImageData(0, 0, S, S)
+  for (let i = 0; i < r.data.length; i += 4) {
+    r.data[i + 1] = s.data[i]
+    r.data[i + 2] = 255
+    r.data[i + 3] = 255
+  }
+  g.filter = 'none'
+  g.putImageData(r, 0, 0)
+  return { tex: Texture.from(out), rect: [rect[0], rect[1], 1 / rect[2], 1 / rect[3]] }
 }
 
 export type HeroStage = 'wire' | 'reveal' | 'done'
@@ -274,30 +328,59 @@ export type HeroStage = 'wire' | 'reveal' | 'done'
  * the cue for the heading to animate in; `done` means the intro is over and the page may scroll.
  */
 export async function createHero(
-  canvas: HTMLCanvasElement,
+  host: HTMLCanvasElement,
   opts: { onProgress: (p: number) => void; onStage: (s: HeroStage) => void; scroll: { smooth: number } },
 ) {
   const desktop = matchMedia('(hover: hover) and (pointer: fine)').matches
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches
   const root = document.documentElement
-
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' })
-  const scene = new THREE.Scene()
-  const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 200)
   const rand = mulberry32(7)
 
-  // ---- day/night colours: every themed uniform lerps between its two values ----
-  const themed: Array<{ d: THREE.Color; n: THREE.Color; value: THREE.Color }> = []
-  const tc = (day: string, night: string) => {
-    const u = { d: new THREE.Color(day), n: new THREE.Color(night), value: new THREE.Color(day) }
-    themed.push(u)
-    return u
+  // Each scene draws on a canvas of its own, next to React's: StrictMode mounts twice on the same
+  // element, and two pixi apps sharing one WebGL context corrupt each other's state.
+  const canvas = document.createElement('canvas')
+  canvas.setAttribute('aria-hidden', 'true')
+  host.after(canvas)
+  host.style.display = 'none'
+
+  const app = new Application()
+  await app.init({
+    canvas,
+    preference: 'webgl', // the shader bits below are GLSL only
+    antialias: true,
+    autoStart: false, // drawn from our own loop, only when something changed
+    backgroundAlpha: 0,
+    powerPreference: 'high-performance',
+    // the canvas only listens for the TV click below; pixi's events would block touch scrolling
+    eventFeatures: { move: false, globalMove: false, click: false, wheel: false },
+  })
+  canvas.style.touchAction = ''
+  const view = new View3D({ toneMapping: 'none', environment: null, autoResize: false })
+  app.stage.addChild(view)
+  const camera = view.camera
+  camera.fov = FOV
+  camera.near = 0.1
+  camera.far = 200
+
+  // ---- day/night colours: every themed material value lerps between its two colours ----
+  type TC = { d: V3; n: V3 }
+  const tc = (day: string, night: string): TC => ({ d: new Color(day).toArray().slice(0, 3) as V3, n: new Color(night).toArray().slice(0, 3) as V3 })
+  const rgb = (hex: string) => new Color(hex).toArray().slice(0, 3) as V3
+  const themed: Array<{ mat: BaseMaterial3D; field: string; tc: TC }> = []
+  // values every material shares, rewritten each frame
+  const shared = { uT: 0, uShake: 0, uPointer: [0, -100, 0] as V3, uShadowMix: 0, uReveal: still ? 1 : 0, uRes: [1, 1] as [number, number] }
+  const live: Array<{ mat: BaseMaterial3D; keys: Array<keyof typeof shared> }> = []
+  let night = 0
+  /** Fill a material's values: theme pairs follow the colour mode, `shared` keys follow the frame. */
+  const bind = <M extends BaseMaterial3D>(mat: M, data: Record<string, TC | number | number[]>, keys: Array<keyof typeof shared> = []) => {
+    for (const [k, v] of Object.entries(data)) {
+      if (typeof v === 'object' && 'd' in v) themed.push({ mat, field: k, tc: v })
+      else mat.data[k] = v
+    }
+    if (keys.length) live.push({ mat, keys })
+    return mat
   }
-  const uTime = { value: 0 }
-  const uNight = { value: 0 }
-  const uShake = { value: 0 }
-  const uPointer = { value: new THREE.Vector3(0, -100, 0) }
-  const uRes = { value: new THREE.Vector2(1, 1) }
+
   const uBg = tc('#fafafa', '#0a0a0a')
   const uLine = tc('#171717', '#ededed')
   const ground = {
@@ -310,317 +393,362 @@ export async function createHero(
     uGlow: tc('#000000', '#1f7a3c'),
     uTip: tc('#f0e392', '#3f8f7c'),
     uDry: tc('#cbbf7c', '#2f5f5a'),
-    uShadow: { value: null as THREE.Texture | null },
-    uShadowMat: { value: new THREE.Matrix4() },
-    uShadowMix: { value: 0 },
   }
-  const wind = { uTime, uShake, uPointer }
+  const reveals = { uBg } // every coloured material also takes part in the intro wipe
+  const revealKeys: Array<keyof typeof shared> = ['uReveal']
 
-  // ---- lights (toon materials only): low warm sun from the left, cool fill ----
-  const sunColor = tc('#ffe0ad', '#8fa8ff')
-  const ambColor = tc('#e6e4ee', '#5568c8')
-  const sun = new THREE.DirectionalLight()
-  sun.position.copy(SUN)
-  const amb = new THREE.AmbientLight()
-  const glow = new THREE.PointLight(0x4dff80, 0, 3, 2)
-  glow.position.set(0, 1.1, 0.45)
-  scene.add(sun, amb, glow)
+  // ---- toon light for the desk and monitors: low warm sun from the left, cool fill ----
+  // a toon shade, by hand: albedo * (sun * ramp(N.L) + ambient), with the ramp
+  // (shade, then a soft step into full light) worked out instead of read from a texture
+  const toonLight = {
+    uSunCol: tc('#ffe0ad', '#8fa8ff'),
+    uAmbCol: tc('#e6e4ee', '#5568c8'),
+    uK: { d: [0.6, 0.56, 0], n: [0.2, 0.22, 0] } as TC, // sun and fill strength
+  }
+  const toonBit = bit('heroToon', {
+    bindings: { material: { uSunCol: v3, uAmbCol: v3, uK: v3 } },
+    gl: {
+      fragment: {
+        material: /* glsl */ `{
+          float x = dot(normal, vec3(${SUN.join(', ')})) * 0.5 + 0.5; // 0 facing away from the sun, 1 facing it
+          float ramp = 0.65 * smoothstep(0.42, 0.95, x) + 0.35 * smoothstep(0.52, 0.6, x);
+          vec3 light = hzL(material.uSunCol) * material.uK.x * ramp + hzL(material.uAmbCol) * material.uK.y;
+          albedo = hzOut(hzToLinear(albedo) * light);
+        }`,
+      },
+    },
+  })
 
-  // Everything that is not part of the wireframe pass.
-  const notInWire: Array<THREE.Object3D> = []
+  // Meshes drawn as lines during the intro.
+  const wired: Array<Mesh3D> = []
 
   // ---- sky: a thin strip above the ridges, with faint drifting smoke-like cloud ----
-  const sky = new THREE.Mesh(
-    new THREE.SphereGeometry(1, 24, 12),
-    new THREE.ShaderMaterial({
-      side: THREE.BackSide,
-      depthTest: false,
-      depthWrite: false,
-      uniforms: {
+  const sky = new Mesh3D({
+    geometry: new SphereGeometry({ radius: 1, widthSegments: 24, heightSegments: 12 }),
+    material: bind(
+      new FlatMaterial({
+        doubleSided: true,
+        fog: false,
+        extraBits: [
+          bit('heroSky', {
+            bindings: { material: { uTop: v3, uSkyMid: v3, uLow: v3, uHorizon: v3, uCloud: v3, uSunGlow: v3, uNight: f1, uT: f1 } },
+            gl: {
+              fragment: {
+                material: /* glsl */ `{
+                  vec3 d = normalize(vPosition - uCameraPosition);
+                  float e = d.y, az = atan(d.x, -d.z), t = material.uT;
+                  vec3 c = mix(hzL(material.uHorizon), hzL(material.uLow), smoothstep(-0.04, 0.03, e));
+                  c = mix(c, hzL(material.uSkyMid), smoothstep(0.02, 0.12, e));
+                  c = mix(c, hzL(material.uTop), smoothstep(0.1, 0.4, e));
+                  float sg = max(dot(d, normalize(vec3(-0.92, 0.04, -0.4))), 0.0);
+                  c += hzL(material.uSunGlow) * (pow(sg, 3.0) * 0.6 + pow(sg, 40.0) * 0.6);
+
+                  float f = hzCloud(vec2(az * 5.0 - t * 0.012, e * 14.0));
+                  c = mix(c, hzL(material.uCloud), smoothstep(0.42, 0.78, f) * smoothstep(-0.02, 0.05, e) * 0.6);
+
+                  vec2 sp = vec2(az, e) * 90.0, cell = floor(sp);
+                  float h = hzHash(cell);
+                  vec2 o = (vec2(hzHash(cell + 1.7), hzHash(cell + 9.2)) - 0.5) * 0.6;
+                  float star = step(0.93, h) * smoothstep(0.12, 0.0, length(fract(sp) - 0.5 - o));
+                  star *= 0.6 + 0.4 * sin(t * (1.0 + h * 3.0) + h * 40.0);
+                  c += star * material.uNight * smoothstep(-0.02, 0.1, e) * vec3(0.9, 0.95, 1.0);
+
+                  float m = distance(d, normalize(vec3(0.3, 0.075, -1.0)));
+                  c += material.uNight * (smoothstep(0.02, 0.017, m) * vec3(1.0, 0.96, 0.85) + exp(-m * 9.0) * 0.18 * vec3(0.6, 0.7, 1.0));
+                  albedo = hzOut(c);
+                }`,
+              },
+            },
+          }),
+          revealBit,
+        ],
+      }),
+      {
         uTop: tc('#7fb6d6', '#060a1c'),
-        uMid: tc('#a9d2df', '#0f1a40'),
+        uSkyMid: tc('#a9d2df', '#0f1a40'),
         uLow: tc('#d3e8e4', '#2b2857'),
         uHorizon: tc('#f6e6cf', '#6a4372'),
         uCloud: tc('#f7f0e8', '#2a2f55'),
         uSunGlow: tc('#ffd58a', '#000000'),
-        uNight,
-        uTime,
+        uNight: 0,
+        ...reveals,
       },
-      vertexShader: /* glsl */ `
-        varying vec3 vDir;
-        void main() {
-          vDir = position;
-          gl_Position = (projectionMatrix * vec4(mat3(viewMatrix) * position, 1.0)).xyww;
-        }`,
-      fragmentShader: /* glsl */ `
-        uniform vec3 uTop, uMid, uLow, uHorizon, uCloud, uSunGlow;
-        uniform float uNight, uTime;
-        varying vec3 vDir;
-        ${NOISE}
-        void main() {
-          vec3 d = normalize(vDir);
-          float e = d.y, az = atan(d.x, -d.z);
-          vec3 c = mix(uHorizon, uLow, smoothstep(-0.04, 0.03, e));
-          c = mix(c, uMid, smoothstep(0.02, 0.12, e));
-          c = mix(c, uTop, smoothstep(0.1, 0.4, e));
-          float sg = max(dot(d, normalize(vec3(-0.92, 0.04, -0.4))), 0.0);
-          c += uSunGlow * (pow(sg, 3.0) * 0.6 + pow(sg, 40.0) * 0.6);
-
-          vec2 cp = vec2(az * 5.0 - uTime * 0.012, e * 14.0);
-          float f = vnoise(cp) * 0.5 + vnoise(cp * 2.1 + 4.0) * 0.3 + vnoise(cp * 4.3 + 9.0) * 0.2;
-          c = mix(c, uCloud, smoothstep(0.42, 0.78, f) * smoothstep(-0.02, 0.05, e) * 0.6);
-
-          vec2 sp = vec2(az, e) * 90.0, cell = floor(sp);
-          float h = hash(cell);
-          vec2 o = (vec2(hash(cell + 1.7), hash(cell + 9.2)) - 0.5) * 0.6;
-          float star = step(0.93, h) * smoothstep(0.12, 0.0, length(fract(sp) - 0.5 - o));
-          star *= 0.6 + 0.4 * sin(uTime * (1.0 + h * 3.0) + h * 40.0);
-          c += star * uNight * smoothstep(-0.02, 0.1, e) * vec3(0.9, 0.95, 1.0);
-
-          float m = distance(d, normalize(vec3(0.3, 0.075, -1.0)));
-          c += uNight * (smoothstep(0.02, 0.017, m) * vec3(1.0, 0.96, 0.85) + exp(-m * 9.0) * 0.18 * vec3(0.6, 0.7, 1.0));
-
-          gl_FragColor = vec4(c, 1.0);
-          #include <colorspace_fragment>
-        }`,
-    }),
-  )
-  sky.frustumCulled = false
-  sky.renderOrder = -1
-  scene.add(sky)
-  notInWire.push(sky)
+      ['uReveal', 'uT'],
+    ),
+    castShadow: false,
+    receiveShadow: false,
+  })
+  sky.scale.set(150, 150, 150)
+  view.root.addChild(sky)
 
   // ---- assets ----
-  const gltf = await new GLTFLoader()
-    .setMeshoptDecoder(MeshoptDecoder)
-    .loadAsync('/hero/scene.glb', (e) => opts.onProgress(0.8 * Math.min(1, e.loaded / (e.total || 190000))))
+  // The GLB is fetched once here for the progress count and the cable ports (node extras, which
+  // the loader drops); the loader then reads it from the HTTP cache.
+  const res = await fetch('/hero/scene.glb')
+  const total = Number(res.headers.get('content-length')) || 260000
+  const chunks: Array<Uint8Array> = []
+  let got = 0
+  for (const reader = res.body!.getReader(); ; ) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(value)
+    got += value.length
+    opts.onProgress(0.8 * Math.min(1, got / total))
+  }
+  const glb = await new Blob(chunks as BlobPart[]).arrayBuffer()
+  const json = JSON.parse(new TextDecoder().decode(new Uint8Array(glb, 20, new DataView(glb).getUint32(12, true))))
+  const ports = new Map<string, V3>()
+  for (const n of json.nodes) if (n.extras?.port) ports.set(n.name, n.extras.port)
+  const source = await Assets.load<Scene3DSource>('/hero/scene.glb')
   opts.onProgress(0.85)
+  const model = new Model3D({ source, castShadow: false, receiveShadow: false })
+  view.root.addChild(model)
   const catPath = /<path d="([^"]+)"/.exec(catSvg)?.[1] ?? null
+  const nodeOf = (name: string) => model.getChildByLabel(name, true) as Container3D
   const cypress = ['Cypress1', 'Cypress2'].map((name) => {
-    const m = gltf.scene.getObjectByName(name) as THREE.Mesh
+    const m = nodeOf(name)
     m.removeFromParent()
-    ;(m.material as THREE.Material).dispose()
-    return m // keeps its own transform: mesh compression stores the vertices rescaled
+    return m
   })
 
   // ---- the parts that float away, and the anchors that stay ----
-  const nodeOf = (name: string) => gltf.scene.getObjectByName(name)!
   const portOf = (name: string): Port => {
-    const o = nodeOf(name)
-    const q = (o.userData.port as Array<number> | undefined) ?? [0, 0, 0]
-    return { obj: o, offset: new THREE.Vector3(q[0], q[2], -q[1]) } // Blender is Z-up, the page is Y-up
+    const q = ports.get(name) ?? [0, 0, 0]
+    return { obj: nodeOf(name), offset: [q[0], q[2], -q[1]] } // Blender is Z-up, the page is Y-up
   }
-  type Floater = { obj: THREE.Object3D; home: THREE.Vector3; target: THREE.Vector3; spin: THREE.Vector3; phase: number }
+  type Floater = { obj: Container3D; home: V3; target: V3; spin: V3; phase: number }
+  const floatNodes: Array<Container3D> = []
+  model.traverse((o) => {
+    if (o.label?.startsWith('Float_') && !(o.parent as Container3D | null)?.label?.startsWith('Float_')) floatNodes.push(o as Container3D)
+  })
   // Parts only drift up a few hundred pixels from where they sit: higher pieces rise more, and
   // each moves slightly sideways and towards the camera so the stack loosens instead of lifting as a block.
-  const floaters: Array<Floater> = gltf.scene.children
-    .filter((o) => o.name.startsWith('Float_'))
-    .map((obj) => {
-      const h = clamp01((obj.position.y - 0.8) / 1.5)
+  const floaters: Array<Floater> = floatNodes.map((obj) => {
+      const p: V3 = [obj.position.x, obj.position.y, obj.position.z]
+      const h = clamp01((p[1] - 0.8) / 1.5)
       const lift = 0.3 + 0.6 * h + rand() * 0.2
       return {
         obj,
-        home: obj.position.clone(),
-        target: obj.position.clone().add(new THREE.Vector3((rand() - 0.5) * 0.55 + obj.position.x * 0.1, lift, (rand() - 0.5) * 0.5)),
-        spin: new THREE.Vector3((rand() - 0.5) * 0.35, (rand() - 0.5) * 0.7, (rand() - 0.5) * 0.35),
+        home: p,
+        target: [p[0] + (rand() - 0.5) * 0.55 + p[0] * 0.1, p[1] + lift, p[2] + (rand() - 0.5) * 0.5],
+        spin: [(rand() - 0.5) * 0.35, (rand() - 0.5) * 0.7, (rand() - 0.5) * 0.35],
         phase: rand() * 6.28,
       }
     })
+  const floating = new Set<Container3D>(floaters.map((f) => f.obj))
+  const isFloating = (o: Container3D | null): boolean => !!o && (floating.has(o) || isFloating(o.parent as Container3D | null))
   const pcNode = nodeOf('Float_pc')
   const mugNode = nodeOf('Float_mug')
-  const CAT_OFFSET = new THREE.Vector3(0, 1.1, -0.06).sub(pcNode.position) // the cat's screen, from the PC's centre
-  const MUG_OFFSET = new THREE.Vector3(0.69, 0.86, 0.2).sub(mugNode.position) // the rim of the mug
+  const CAT_OFFSET = sub([0, 1.1, -0.06], [pcNode.position.x, pcNode.position.y, pcNode.position.z]) // the cat's screen, from the PC's centre
+  const MUG_OFFSET = sub([0.69, 0.86, 0.2], [mugNode.position.x, mugNode.position.y, mugNode.position.z]) // the rim of the mug
+  const worldOf = (node: Container3D, o: V3) => xform(node.getGlobalTransform().elements, o[0], o[1], o[2])
 
-  // ---- shadows: rendered once from the sun, then they are just a texture ----
-  // Two channels by multiply-blending two passes: r is the shadow of everything, g the shadow of
-  // the parts that stay (desk and the two ground monitors), so shadows fade as things float off.
-  const shadowCam = new THREE.OrthographicCamera(-2.6, 2.6, 2.6, -2.6, 0.1, 40)
-  shadowCam.position.copy(SUN).multiplyScalar(15).setY(SUN.y * 15 + 1)
-  shadowCam.lookAt(0, 1, 0)
-  shadowCam.updateMatrixWorld()
-  const shadowRT = new THREE.WebGLRenderTarget(512, 512)
-  const bake = new THREE.Scene().add(gltf.scene)
-  const stamp = (r: number, g: number, b: number) =>
-    new THREE.MeshBasicMaterial({
-      color: new THREE.Color().setRGB(r, g, b, THREE.LinearSRGBColorSpace),
-      blending: THREE.CustomBlending,
-      blendEquation: THREE.AddEquation,
-      blendSrc: THREE.ZeroFactor,
-      blendDst: THREE.SrcColorFactor,
-    })
-  const stampAll = stamp(0, 1, 1)
-  const stampStay = stamp(1, 0, 1)
-  renderer.setClearColor(0xffffff)
-  renderer.setRenderTarget(shadowRT)
-  bake.overrideMaterial = stampAll
-  renderer.render(bake, shadowCam)
-  renderer.autoClear = false
-  for (const f of floaters) f.obj.visible = false
-  bake.overrideMaterial = stampStay
-  renderer.render(bake, shadowCam)
-  for (const f of floaters) f.obj.visible = true
-  renderer.autoClear = true
-  renderer.setRenderTarget(null)
-  stampAll.dispose()
-  stampStay.dispose()
-  ground.uShadow.value = shadowRT.texture
-  ground.uShadowMat.value.multiplyMatrices(shadowCam.projectionMatrix, shadowCam.matrixWorldInverse)
+  // ---- shadows: drawn once, then they are just a texture ----
+  const shadow = bakeShadow(model, (m) => !isFloating(m))
+  const shadowFields = { uShRect: shadow.rect }
 
-  // ---- desk + monitors: toon materials and inverted-hull outlines ----
-  const ramp = new Uint8Array(32)
-  for (let i = 0; i < 32; i++) {
-    const x = i / 31 // 0 = facing away from the sun, 1 = facing it
-    ramp[i] = 255 * (0.65 * smooth(0.42, 0.95, x) + 0.35 * smooth(0.52, 0.6, x))
-  }
-  const gradient = new THREE.DataTexture(ramp, 32, 1, THREE.RedFormat)
-  gradient.minFilter = gradient.magFilter = THREE.LinearFilter
-  gradient.needsUpdate = true
-  const uOutlinePx = { value: 1.4 }
-  const outlineMat = new THREE.ShaderMaterial({
-    side: THREE.BackSide,
-    uniforms: { uColor: tc('#5f4a3d', '#04050c'), uRes, uPx: uOutlinePx },
-    vertexShader: /* glsl */ `
-      uniform vec2 uRes;
-      uniform float uPx;
-      void main() {
-        vec4 clip = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        vec2 dir = normalize((projectionMatrix * vec4(normalMatrix * normal, 0.0)).xy * uRes + 1e-6);
-        clip.xy += dir * (2.0 * uPx / uRes) * clip.w;
-        gl_Position = clip;
-      }`,
-    fragmentShader: `uniform vec3 uColor; void main() { gl_FragColor = vec4(uColor, 1.0); \n#include <colorspace_fragment>\n }`,
-  })
+  // ---- desk + monitors: toon materials with outlines ----
+  // outlines: an inverted hull per part, pushed out a fixed number of pixels in clip space
+  const outlineMat = bind(
+    new FlatMaterial({
+      fog: false,
+      extraBits: [
+        bit('heroOutline', {
+          bindings: { material: { uOutline: v3, uPx: f1, uRes: 'vec2<f32>' } },
+          gl: {
+            vertex: {
+              afterTransform: /* glsl */ `{
+                vec3 vn = mat3(uViewMatrix) * worldNormal;
+                vec2 dir = normalize((uProjectionMatrix * vec4(vn, 0.0)).xy * material.uRes + 1e-6);
+                gl_Position.xy += dir * (2.0 * material.uPx / material.uRes) * gl_Position.w;
+              }`,
+            },
+            fragment: { material: 'albedo = decodeColor(material.uOutline);' },
+          },
+        }),
+        revealBit,
+      ],
+    }),
+    { uOutline: tc('#5f4a3d', '#04050c'), uPx: 1, ...reveals },
+    ['uReveal', 'uRes'],
+  )
+  outlineMat.state.cullMode = 'front'
   let drawCat: ((lx: number, ly: number, open: number) => void) | null = null
   let drawThemeIcon: ((dark: boolean) => void) | null = null
-  let screenMat: THREE.MeshBasicMaterial | null = null
-  const toon = new Map<string, THREE.Material>()
-  const meshes: Array<THREE.Mesh> = []
-  gltf.scene.traverse((o) => {
-    if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh)
+  let screenMat: FlatMaterial | null = null
+  const toon = new Map<string, BaseMaterial3D>()
+  const outlined = new Set<string>()
+  const meshes: Array<Mesh3D> = []
+  model.traverse((o) => {
+    if (o instanceof Mesh3D && o.material) meshes.push(o)
   })
   for (const mesh of meshes) {
-    const src = mesh.material as THREE.MeshStandardMaterial
-    if (src.name === 'glass') {
+    const src = mesh.material as BaseMaterial3D & { baseColor?: Color }
+    const name = src.label ?? ''
+    if (name === 'glass') {
       if (!screenMat) {
         const atlas = screenAtlas(catPath)
         drawCat = atlas.drawCat
         drawThemeIcon = atlas.drawThemeIcon
-        screenMat = new THREE.MeshBasicMaterial({ map: atlas.tex })
+        screenMat = bind(new FlatMaterial({ baseColorTexture: atlas.tex, extraBits: [revealBit] }), reveals, revealKeys)
       }
       mesh.material = screenMat
-    } else if (src.name === 'led') {
-      mesh.material = new THREE.MeshBasicMaterial({ color: 0x7dff8a })
+    } else if (name === 'led') {
+      mesh.material = bind(new FlatMaterial({ baseColor: 0x7dff8a, extraBits: [revealBit] }), reveals, revealKeys)
     } else {
-      if (!toon.has(src.name)) {
-        const side = src.name === 'leaf' ? THREE.DoubleSide : THREE.FrontSide
-        toon.set(src.name, new THREE.MeshToonMaterial({ color: src.color, gradientMap: gradient, side }))
+      if (!toon.has(name)) {
+        // small parts read better without a line around each one
+        const outline = !/^(key|bay|label|metal|coffee|cable|glassOff|deskGap|note|leaf|vine|pages|teal|orange)/.test(name)
+        const mat = new FlatMaterial({ baseColor: src.baseColor ?? 0xffffff, doubleSided: name === 'leaf', extraBits: [toonBit, revealBit] })
+        toon.set(name, bind(mat, { ...toonLight, ...reveals }, revealKeys))
+        if (outline) outlined.add(name)
       }
-      mesh.material = toon.get(src.name)!
-      // small parts read better without a line around each one
-      if (!/^(key|bay|label|metal|coffee|cable|glassOff|deskGap|note|leaf|vine|pages|teal|orange)/.test(src.name)) {
-        const outline = new THREE.Mesh(mesh.geometry, outlineMat)
-        mesh.add(outline)
-        notInWire.push(outline)
-      }
+      mesh.material = toon.get(name)!
+      if (outlined.has(name)) mesh.addChild(new Mesh3D({ geometry: mesh.geometry, material: outlineMat, castShadow: false, receiveShadow: false }))
     }
-    src.dispose()
+    wired.push(mesh)
   }
-  scene.add(gltf.scene)
 
   // ---- cypresses on the shoulders of the two hills ----
-  const treeMat = new THREE.ShaderMaterial({
-    vertexColors: true,
-    uniforms: { uSunDir: { value: SUN }, uTreeLight: tc('#ffffff', '#2c3f73'), uAir: ground.uAir },
-    vertexShader: /* glsl */ `
-      uniform vec3 uSunDir, uTreeLight, uAir;
-      varying vec3 vColor;
-      void main() {
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        float l = smoothstep(-0.3, 0.8, dot(normalize(mat3(modelMatrix) * normal), uSunDir));
-        vColor = mix(color.rgb * mix(0.5, 1.5, l) * uTreeLight, uAir, smoothstep(8.0, 48.0, -wp.z) * 0.55);
-        gl_Position = projectionMatrix * viewMatrix * wp;
-      }`,
-    fragmentShader: `varying vec3 vColor; void main() { gl_FragColor = vec4(vColor, 1.0); \n#include <colorspace_fragment>\n }`,
-  })
-  // x, z, scale, model
+  const treeMat = bind(
+    new FlatMaterial({
+      vertexColors: true,
+      extraBits: [
+        bit('heroTree', {
+          bindings: { material: { uTreeLight: v3, uAir: v3 } },
+          gl: {
+            fragment: {
+              material: /* glsl */ `{
+                float l = smoothstep(-0.3, 0.8, dot(normal, vec3(${SUN.join(', ')})));
+                vec3 c = hzToLinear(albedo) * mix(0.5, 1.5, l) * hzL(material.uTreeLight);
+                albedo = hzOut(mix(c, hzL(material.uAir), hzAir(vPosition)));
+              }`,
+            },
+          },
+        }),
+        revealBit,
+      ],
+    }),
+    { uTreeLight: tc('#ffffff', '#2c3f73'), uAir: ground.uAir, ...reveals },
+    revealKeys,
+  )
   for (const [x, z, s, kind] of [
     [-12.5, -14, 0.52, 0], [-5.5, -16.5, 0.5, 1], // hill A
     [7.5, -26.5, 0.62, 0], [11.5, -25.5, 0.6, 1], [14, -27.5, 0.55, 0], // hill B
   ]) {
-    const model = cypress[kind].clone()
-    model.material = treeMat
-    const tree = new THREE.Group().add(model)
+    const src = cypress[kind] as Mesh3D
+    const model = new Mesh3D({ geometry: src.geometry, material: treeMat, castShadow: false, receiveShadow: false })
+    model.position.copyFrom(src.position)
+    model.quaternion.copyFrom(src.quaternion)
+    model.scale.copyFrom(src.scale) // keeps its own transform: mesh compression stores the vertices rescaled
+    const tree = new Mesh3D()
+    tree.addChild(model)
     tree.position.set(x, hill(x, z) - 0.05, z)
     tree.rotation.y = rand() * 6.28
-    tree.scale.setScalar(s)
-    scene.add(tree)
+    tree.scale.set(s, s, s)
+    view.root.addChild(tree)
+    wired.push(model)
   }
 
   // ---- ground: the soil seen between the blades ----
-  const groundGeo = new THREE.PlaneGeometry(90, 74, 110, 90).rotateX(-Math.PI / 2).translate(0, 0, -25)
-  const gp = groundGeo.attributes.position
-  for (let i = 0; i < gp.count; i++) gp.setY(i, hill(gp.getX(i), gp.getZ(i)))
-  groundGeo.computeVertexNormals()
-  scene.add(
-    new THREE.Mesh(
-      groundGeo,
-      new THREE.ShaderMaterial({
-        uniforms: { ...ground, uSunDir: { value: SUN } },
-        vertexShader: /* glsl */ `
-          uniform vec3 uSunDir;
-          varying vec3 vW;
-          varying float vLit;
-          void main() {
-            vW = position;
-            vLit = dot(normal, uSunDir);
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }`,
-        fragmentShader: /* glsl */ `
-          ${NOISE}${POOL}${SHADOW}${GROUND}
-          varying vec3 vW;
-          varying float vLit;
-          void main() {
-            vec3 c = groundColor(vW, smoothstep(0.1, 0.6, vLit), pool(vW.xz), shadowAt(vW));
-            // dark between the blades close up; further off the tufts thin out, so match their tone
-            c *= mix(0.42, 0.8, smoothstep(6.0, 22.0, length(vW.xz))) + 0.18 * vnoise(vW.xz * 26.0);
-            gl_FragColor = vec4(air(c, vW), 1.0);
-            #include <colorspace_fragment>
-          }`,
-      }),
-    ),
-  )
+  {
+    const NX = 110
+    const NZ = 90
+    const positions = new Float32Array((NX + 1) * (NZ + 1) * 3)
+    const normals = new Float32Array((NX + 1) * (NZ + 1) * 3)
+    const indices = new Uint32Array(NX * NZ * 6)
+    for (let j = 0, v = 0; j <= NZ; j++) {
+      for (let i = 0; i <= NX; i++, v++) {
+        const x = -45 + (90 * i) / NX
+        const z = 12 - (74 * j) / NZ
+        positions.set([x, hill(x, z), z], v * 3)
+        const e = 0.3
+        const n = norm([hill(x - e, z) - hill(x + e, z), 2 * e, hill(x, z - e) - hill(x, z + e)])
+        normals.set(n, v * 3)
+      }
+    }
+    for (let j = 0, k = 0; j < NZ; j++) {
+      for (let i = 0; i < NX; i++) {
+        const a = j * (NX + 1) + i
+        const b = a + NX + 1 // one row further along -z
+        indices.set([a, a + 1, b, b, a + 1, b + 1], k)
+        k += 6
+      }
+    }
+    const soil = new Mesh3D({
+      geometry: new Geometry3D({ positions, normals, indices }),
+      material: bind(
+        new FlatMaterial({
+          doubleSided: true,
+          textures: { shadow: shadow.tex },
+          extraBits: [
+            bit('heroSoil', {
+              textures: ['shadow'],
+              bindings: { material: GROUND_FIELDS },
+              gl: {
+                fragment: {
+                  material: /* glsl */ `{
+                    vec3 w = vPosition;
+                    float lit = smoothstep(0.1, 0.6, dot(normal, vec3(${SUN.join(', ')})));
+                    vec3 c = hzGround(w, lit, hzPool(w.xz), ${shadowAt('w')}, ${GROUND_ARGS});
+                    // dark between the blades close up; further off the tufts thin out, so match their tone
+                    c *= mix(0.42, 0.8, smoothstep(6.0, 22.0, length(w.xz))) + 0.18 * hzNoise(w.xz * 26.0);
+                    albedo = hzOut(mix(c, hzL(material.uAir), hzAir(w)));
+                  }`,
+                },
+              },
+            }),
+            revealBit,
+          ],
+        }),
+        { ...ground, ...shadowFields, ...reveals },
+        ['uShadowMix', 'uReveal'],
+      ),
+      castShadow: false,
+      receiveShadow: false,
+    })
+    view.root.addChild(soil)
+    wired.push(soil)
+  }
 
-  // ---- grass and flowers: one instanced draw call each ----
-  const instanced = (base: THREE.BufferGeometry, count: number, fill: (i: number, a: Float32Array, b: Float32Array, c: Float32Array) => void) => {
-    const geo = new THREE.InstancedBufferGeometry()
-    geo.index = base.index
-    geo.setAttribute('position', base.attributes.position)
-    const a = new Float32Array(count * 3)
-    const b = new Float32Array(count * 4)
-    const c = new Float32Array(count * 3)
-    for (let i = 0; i < count; i++) fill(i, a, b, c)
-    geo.setAttribute('aOffset', new THREE.InstancedBufferAttribute(a, 3))
-    geo.setAttribute('aData', new THREE.InstancedBufferAttribute(b, 4))
-    geo.setAttribute('aColor', new THREE.InstancedBufferAttribute(c, 3))
-    geo.instanceCount = count
-    return geo
+  // ---- grass and flowers: one instanced draw each ----
+  /** A batch of one geometry: `fill` writes each copy's root position and two vec4s of data. */
+  const batch = (geo: Geometry3D, mat: BaseMaterial3D, count: number, fill: (i: number, root: Float32Array, a: Float32Array, b: Float32Array) => void) => {
+    const mesh = new BatchedMesh3D({
+      size: count,
+      instanceData: { a: { value: [0, 0, 0, 0], type: 'vec4<f32>' }, b: { value: [0, 0, 0, 0], type: 'vec4<f32>' } },
+    })
+    const m = new Matrix4()
+    const root = new Float32Array(3)
+    const a = new Float32Array(4)
+    const b = new Float32Array(4)
+    for (let i = 0; i < count; i++) {
+      fill(i, root, a, b)
+      mesh.setGeometryAt(i, geo)
+      mesh.setMaterialAt(i, mat)
+      mesh.setMatrixAt(i, m.makeTranslation(root[0], root[1], root[2]))
+      mesh.setInstanceDataAt(i, 'a', a[0], a[1], a[2], a[3])
+      mesh.setInstanceDataAt(i, 'b', b[0], b[1], b[2], b[3])
+      mesh.setPassesAt(i, RenderPassBit.OPAQUE)
+    }
+    return mesh
   }
   // A point inside the wedge the cameras can see, between two depths. `patch` is the
   // size of the clumps it grows in: noise decides where the meadow is thick or thin.
-  const spot = (z0: number, z1: number, patch: number) => {
+  const spot = (z0: number, z1: number, patch: number): V3 => {
     for (;;) {
       const z = lerp(z0, z1, rand())
       const x = (rand() * 2 - 1) * Math.min(1.5 + (10.5 - z) * 0.68, 38)
-      if (rand() < 0.25 + 0.75 * noise2(x * patch + 40, z * patch)) return [x, hill(x, z), z] as const
+      if (rand() < 0.25 + 0.75 * noise2(x * patch + 40, z * patch)) return [x, hill(x, z), z]
     }
   }
 
   // Flowers first: each one also gets a stem, which is just another blade in the grass.
   const kinds = [
-    { color: new THREE.Color('#fffaf0'), petals: 12 }, // daisy
-    { color: new THREE.Color('#f29ac0'), petals: 8 },
-    { color: new THREE.Color('#e5532d'), petals: 6 }, // poppy, echoing the desk
-    { color: new THREE.Color('#b99be6'), petals: 5 },
+    { color: rgb('#fffaf0'), petals: 12 }, // daisy
+    { color: rgb('#f29ac0'), petals: 8 },
+    { color: rgb('#e5532d'), petals: 6 }, // poppy, echoing the desk
+    { color: rgb('#b99be6'), petals: 5 },
   ]
   const blooms = Array.from({ length: desktop ? 6000 : 2000 }, () => {
     const [x, y, z] = spot(6.5, -22, 0.3)
@@ -637,148 +765,173 @@ export async function createHero(
     { count: desktop ? 45000 : 12000, z0: -14, z1: -23, wide: 2.8, tall: 1.6 },
     { count: desktop ? 35000 : 9000, z0: -23, z1: -44, wide: 4.5, tall: 2.3 },
   ]
-  const blade = new THREE.BufferGeometry()
-  blade.setAttribute('position', new THREE.Float32BufferAttribute([-0.5, 0, 0, 0.5, 0, 0, -0.4, 0.33, 0, 0.4, 0.33, 0, -0.25, 0.66, 0, 0.25, 0.66, 0, 0, 1, 0], 3))
-  blade.setIndex([0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5, 4, 5, 6])
-  const grass = new THREE.Mesh(
-    instanced(blade, blooms.length + bands.reduce((n, b) => n + b.count, 0), (i, a, b, c) => {
-      if (i < blooms.length) {
-        const f = blooms[i]
-        a.set([f.x, f.y, f.z], i * 3)
-        b.set([f.stem, rand() * Math.PI, f.rnd, 0.006], i * 4)
-        c.set([0, 0, slopeLit(f.x, f.z)], i * 3) // straight and green
-        return
-      }
-      let n = i - blooms.length
-      const band = bands.find((bd) => (n -= bd.count) < 0)!
-      const [x, y, z] = spot(band.z0, band.z1, 0.9)
-      const seed = band === bands[0] && rand() < 0.03 // a few tall seed stalks
-      const height = (0.06 + rand() * 0.1) * band.tall * (0.7 + 0.6 * noise2(x * 0.5 + 9, z * 0.5)) * (seed ? 2.2 : 1)
-      a.set([x, y, z], i * 3)
-      b.set([height, rand() * Math.PI, rand(), (0.009 + rand() * 0.009) * band.wide * coarse * (seed ? 0.6 : 1)], i * 4)
-      // dryness, how far the blade arcs over, slope light
-      c.set([seed ? 1 : rand() < 0.14 ? 0.5 + rand() * 0.5 : rand() * 0.15, 0.15 + rand() * 0.5, slopeLit(x, z)], i * 3)
-    }),
-    new THREE.ShaderMaterial({
-      side: THREE.DoubleSide,
-      uniforms: { ...ground, ...wind, uSunDir: { value: SUN } },
-      vertexShader: /* glsl */ `
-        attribute vec3 aOffset, aColor; // aColor: dryness, arc, slope light
-        attribute vec4 aData;           // height, yaw, random, width
-        uniform vec3 uSunDir;
-        varying vec3 vColor;
-        ${NOISE}${POOL}${SHADOW}${GROUND}${WIND}
-        void main() {
-          float h = position.y, c = cos(aData.y), s = sin(aData.y);
-          // a blade that arcs over as it rises
-          vec3 p = vec3(position.x * aData.w, h * aData.x * (1.0 - 0.18 * aColor.y * h), h * h * aData.x * aColor.y);
-          p = vec3(c * p.x + s * p.z, p.y, c * p.z - s * p.x);
-          vec2 sw = sway(aOffset, aData.z) * h * h * aData.x;
-          p.xz += sw;
-          p.y -= length(sw) * 0.3;
+  const blade = new Geometry3D({
+    positions: new Float32Array([-0.5, 0, 0, 0.5, 0, 0, -0.4, 0.33, 0, 0.4, 0.33, 0, -0.25, 0.66, 0, 0.25, 0.66, 0, 0, 1, 0]),
+    indices: new Uint16Array([0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5, 4, 5, 6]),
+  })
+  const grassMat = bind(
+    new FlatMaterial({
+      doubleSided: true,
+      textures: { shadow: shadow.tex },
+      extraBits: [
+        bit('heroGrass', {
+          textures: ['shadow'],
+          interStage: { vColor: 'vec3<f32>' },
+          bindings: { material: { ...GROUND_FIELDS, ...WIND_FIELDS }, instance: { a: 'vec4<f32>', b: 'vec4<f32>' } },
+          gl: {
+            vertex: {
+              // a: height, yaw, random, width. b: dryness, arc, slope light
+              beforeTransform: /* glsl */ `{
+                vec3 root = modelMatrix[3].xyz;
+                vec4 D = instance.a, C = instance.b;
+                float h = position.y, c = cos(D.y), s = sin(D.y);
+                // a blade that arcs over as it rises
+                vec3 p = vec3(position.x * D.w, h * D.x * (1.0 - 0.18 * C.y * h), h * h * D.x * C.y);
+                p = vec3(c * p.x + s * p.z, p.y, c * p.z - s * p.x);
+                vec2 sw = hzSway(root, D.z, ${WIND_ARGS}) * h * h * D.x;
+                p.xz += sw;
+                p.y -= length(sw) * 0.3;
+                position = vec4(p, 1.0);
 
-          float pl = pool(aOffset.xz), sh = shadowAt(aOffset);
-          vec3 g = groundColor(aOffset, aColor.z, pl, sh);
-          vec3 col = g * mix(0.4, 1.0, smoothstep(0.0, 0.75, h));              // roots sit in the blades' own shade
-          col = mix(col, uDry * dot(g, vec3(1.2)), aColor.x * (0.25 + 0.6 * h)); // dry blades and seed heads
-          col = mix(col, mix(g * 1.5, uTip, pl * sh), h * h * 0.45);           // tips catch the light
-          col *= 0.82 + 0.36 * abs(dot(vec3(s, 0.0, c), uSunDir));             // face-on to the sun is brighter than edge-on
-          vColor = air(col * (0.9 + 0.2 * aData.z), aOffset);
-          gl_Position = projectionMatrix * viewMatrix * vec4(aOffset + p, 1.0);
-        }`,
-      fragmentShader: `varying vec3 vColor; void main() { gl_FragColor = vec4(vColor, 1.0); \n#include <colorspace_fragment>\n }`,
+                float pl = hzPool(root.xz), sh = ${shadowAt('root')};
+                vec3 g = hzGround(root, C.z, pl, sh, ${GROUND_ARGS});
+                vec3 col = g * mix(0.4, 1.0, smoothstep(0.0, 0.75, h));                    // roots sit in the blades' own shade
+                col = mix(col, hzL(material.uDry) * dot(g, vec3(1.2)), C.x * (0.25 + 0.6 * h)); // dry blades and seed heads
+                col = mix(col, mix(g * 1.5, hzL(material.uTip), pl * sh), h * h * 0.45);     // tips catch the light
+                col *= 0.82 + 0.36 * abs(dot(vec3(s, 0.0, c), vec3(${SUN.join(', ')})));   // face-on to the sun is brighter than edge-on
+                vColor = mix(col * (0.9 + 0.2 * D.z), hzL(material.uAir), hzAir(root));
+              }`,
+            },
+            fragment: { material: 'albedo = hzOut(vColor);' },
+          },
+        }),
+        revealBit,
+      ],
     }),
+    { ...ground, ...shadowFields, ...reveals },
+    ['uShadowMix', 'uT', 'uShake', 'uPointer', 'uReveal'],
   )
-
-  const flowers = new THREE.Mesh(
-    instanced(new THREE.PlaneGeometry(1, 1), blooms.length, (i, a, b, c) => {
+  const grass = batch(blade, grassMat, blooms.length + bands.reduce((n, b) => n + b.count, 0), (i, r, a, b) => {
+    if (i < blooms.length) {
       const f = blooms[i]
-      a.set([f.x, f.y, f.z], i * 3)
-      b.set([f.size, f.rnd, f.kind.petals, f.stem], i * 4)
-      f.kind.color.toArray(c, i * 3)
+      r.set([f.x, f.y, f.z])
+      a.set([f.stem, rand() * Math.PI, f.rnd, 0.006])
+      b.set([0, 0, slopeLit(f.x, f.z), 0]) // straight and green
+      return
+    }
+    let n = i - blooms.length
+    const band = bands.find((bd) => (n -= bd.count) < 0)!
+    const [x, y, z] = spot(band.z0, band.z1, 0.9)
+    const seed = band === bands[0] && rand() < 0.03 // a few tall seed stalks
+    const height = (0.06 + rand() * 0.1) * band.tall * (0.7 + 0.6 * noise2(x * 0.5 + 9, z * 0.5)) * (seed ? 2.2 : 1)
+    r.set([x, y, z])
+    a.set([height, rand() * Math.PI, rand(), (0.009 + rand() * 0.009) * band.wide * coarse * (seed ? 0.6 : 1)])
+    // dryness, how far the blade arcs over, slope light
+    b.set([seed ? 1 : rand() < 0.14 ? 0.5 + rand() * 0.5 : rand() * 0.15, 0.15 + rand() * 0.5, slopeLit(x, z), 0])
+  })
+
+  const flowerMat = bind(
+    new FlatMaterial({
+      alphaMode: 'mask',
+      textures: { shadow: shadow.tex },
+      extraBits: [
+        bit('heroFlower', {
+          textures: ['shadow'],
+          interStage: { vColor: 'vec3<f32>', vShape: 'vec4<f32>', vPetal: 'vec2<f32>' },
+          bindings: { material: { ...WIND_FIELDS, uShadowMix: f1, uShRect: 'vec4<f32>', uAir: v3, uFlowerTint: v3, uCenter: v3 }, instance: { a: 'vec4<f32>', b: 'vec4<f32>' } },
+          gl: {
+            vertex: {
+              // a: size, random, petals, stem height. b: colour
+              afterTransform: /* glsl */ `{
+                vec3 root = modelMatrix[3].xyz;
+                vec4 D = instance.a;
+                vec3 base = root + vec3(0.0, D.w, 0.0);
+                base.xz += hzSway(root, D.y, ${WIND_ARGS}) * D.w;
+                vec4 mv = uViewMatrix * vec4(base, 1.0);
+                // billboard, squashed vertically so the bloom reads as tilted up towards the sky
+                vec2 q = position.xy;
+                mv.xy += q * D.x * vec2(1.0, 0.5 + 0.35 * D.y);
+                vPetal = q * 2.0;
+                vColor = instance.b.rgb;
+                float light = mix(0.38, 1.0, hzPool(root.xz)) * mix(0.6, 1.0, ${shadowAt('root')});
+                vShape = vec4(D.z, D.y, light, hzAir(root));
+                gl_Position = uProjectionMatrix * mv;
+              }`,
+            },
+            fragment: {
+              material: /* glsl */ `{
+                float r = length(vPetal);
+                float petal = pow(abs(cos(atan(vPetal.y, vPetal.x) * vShape.x * 0.5 + vShape.y * 6.28)), 0.7);
+                alpha = r > mix(0.4, 1.0, petal) ? 0.0 : 1.0;
+                vec3 c = r < 0.26
+                  ? hzL(material.uCenter) * mix(1.0, 0.72, smoothstep(0.1, 0.26, r))
+                  : hzL(vColor) * mix(0.78, 1.0, smoothstep(0.26, 0.9, r)) * mix(0.9, 1.0, petal);
+                albedo = hzOut(mix(c * hzL(material.uFlowerTint) * vShape.z, hzL(material.uAir), vShape.w));
+              }`,
+            },
+          },
+        }),
+        revealBit,
+      ],
     }),
-    new THREE.ShaderMaterial({
-      uniforms: { ...wind, uShadow: ground.uShadow, uShadowMat: ground.uShadowMat, uShadowMix: ground.uShadowMix, uAir: ground.uAir, uFlowerTint: tc('#ffffff', '#7f8fd0'), uCenter: { value: new THREE.Color('#f2b632') } },
-      vertexShader: /* glsl */ `
-        attribute vec3 aOffset, aColor;
-        attribute vec4 aData; // size, random, petals, stem height
-        varying vec3 vColor;
-        varying vec2 vUv;
-        varying vec4 vShape;
-        ${NOISE}${POOL}${SHADOW}${WIND}
-        void main() {
-          vec3 base = aOffset + vec3(0.0, aData.w, 0.0);
-          base.xz += sway(aOffset, aData.y) * aData.w;
-          vec4 mv = viewMatrix * vec4(base, 1.0);
-          // billboard, squashed vertically so the bloom reads as tilted up towards the sky
-          mv.xy += position.xy * aData.x * vec2(1.0, 0.5 + 0.35 * aData.y);
-          vUv = position.xy * 2.0;
-          vColor = aColor;
-          float light = mix(0.38, 1.0, pool(aOffset.xz)) * mix(0.6, 1.0, shadowAt(aOffset));
-          vShape = vec4(aData.z, aData.y, light, smoothstep(8.0, 48.0, -aOffset.z) * 0.55);
-          gl_Position = projectionMatrix * mv;
-        }`,
-      fragmentShader: /* glsl */ `
-        uniform vec3 uFlowerTint, uCenter, uAir;
-        varying vec3 vColor;
-        varying vec2 vUv;
-        varying vec4 vShape; // petals, random, light, haze
-        void main() {
-          float r = length(vUv);
-          float petal = pow(abs(cos(atan(vUv.y, vUv.x) * vShape.x * 0.5 + vShape.y * 6.28)), 0.7);
-          if (r > mix(0.4, 1.0, petal)) discard;
-          vec3 c = r < 0.26
-            ? uCenter * mix(1.0, 0.72, smoothstep(0.1, 0.26, r))
-            : vColor * mix(0.78, 1.0, smoothstep(0.26, 0.9, r)) * mix(0.9, 1.0, petal);
-          gl_FragColor = vec4(mix(c * uFlowerTint * vShape.z, uAir, vShape.w), 1.0);
-          #include <colorspace_fragment>
-        }`,
-    }),
+    { ...shadowFields, uAir: ground.uAir, uFlowerTint: tc('#ffffff', '#7f8fd0'), uCenter: rgb('#f2b632'), ...reveals },
+    ['uShadowMix', 'uT', 'uShake', 'uPointer', 'uReveal'],
   )
+  const flowerQuad = new PlaneGeometry({ width: 1, height: 1 })
+  const flowers = batch(flowerQuad, flowerMat, blooms.length, (i, r, a, b) => {
+    const f = blooms[i]
+    r.set([f.x, f.y, f.z])
+    a.set([f.size, f.rnd, f.kind.petals, f.stem])
+    b.set([...f.kind.color, 0])
+  })
+  view.root.addChild(grass, flowers)
 
   // ---- steam off the coffee: one billboard with a scrolling-noise wisp ----
-  const uMug = { value: new THREE.Vector3(0.69, 0.86, 0.2) }
-  const steam = new THREE.Mesh(
-    new THREE.PlaneGeometry(1, 1),
-    new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      uniforms: { uTime, uColor: tc('#ffffff', '#9fb0e0'), uMug },
-      vertexShader: /* glsl */ `
-        uniform vec3 uMug;
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          vec4 mv = viewMatrix * vec4(uMug, 1.0); // rim of the mug
-          mv.xy += (position.xy + vec2(0.0, 0.5)) * vec2(0.14, 0.34);
-          gl_Position = projectionMatrix * mv;
-        }`,
-      fragmentShader: /* glsl */ `
-        uniform float uTime;
-        uniform vec3 uColor;
-        varying vec2 vUv;
-        ${NOISE}
-        void main() {
-          float n = vnoise(vec2(vUv.x * 3.0, vUv.y * 2.2 - uTime * 0.45));
-          float x = vUv.x - 0.5 + (n - 0.5) * 0.45 * vUv.y + sin(vUv.y * 5.0 + uTime * 0.8) * 0.08 * vUv.y;
-          float a = smoothstep(0.16 + 0.1 * vUv.y, 0.0, abs(x)) * smoothstep(0.0, 0.12, vUv.y)
-                  * (1.0 - smoothstep(0.35, 1.0, vUv.y)) * (0.35 + 0.65 * n);
-          gl_FragColor = vec4(uColor, a * 0.5);
-          #include <colorspace_fragment>
-        }`,
+  const steamMat = bind(
+    new FlatMaterial({
+      alphaMode: 'blend',
+      fog: false,
+      extraBits: [
+        bit('heroSteam', {
+          bindings: { material: { uT: f1, uSteam: v3, uMug: v3 } },
+          gl: {
+            vertex: {
+              afterTransform: /* glsl */ `{
+                vec4 mv = uViewMatrix * vec4(material.uMug, 1.0); // rim of the mug
+                mv.xy += (position.xy + vec2(0.0, 0.5)) * vec2(0.14, 0.34);
+                gl_Position = uProjectionMatrix * mv;
+              }`,
+            },
+            fragment: {
+              material: /* glsl */ `{
+                vec2 uv = vUV;
+                float a = hzSteam(uv, material.uT);
+                albedo = decodeColor(material.uSteam);
+                alpha = a * 0.5;
+              }`,
+            },
+          },
+        }),
+      ],
     }),
+    { uSteam: tc('#ffffff', '#9fb0e0'), uMug: [0.69, 0.86, 0.2] },
+    ['uT'],
   )
-  for (const m of [grass, flowers, steam]) {
-    m.frustumCulled = false
-    scene.add(m)
-    notInWire.push(m)
-  }
+  const steam = new Mesh3D({ geometry: new PlaneGeometry({ width: 1, height: 1 }), material: steamMat, castShadow: false, receiveShadow: false })
+  view.root.addChild(steam)
 
   // ---- wires between the parts, long enough to stay joined all the way up ----
-  const dist = (n: string) => (floaters.find((f) => f.obj.name === n)?.target ?? nodeOf(n).position)
-  const wire = (a: string, b: string, radius: number, color = '#2b2c30') => ({
-    a: portOf(a), b: portOf(b), radius, color, finalDistance: dist(a).distanceTo(dist(b)),
-  })
+  const dist = (n: string): V3 => {
+    const f = floaters.find((x) => x.obj.label === n)
+    if (f) return f.target
+    const p = nodeOf(n).position
+    return [p.x, p.y, p.z]
+  }
+  const wire = (a: string, b: string, radius: number, color = '#2b2c30') => {
+    const pa = dist(a)
+    const pb = dist(b)
+    return { a: portOf(a), b: portOf(b), radius, color, finalDistance: Math.hypot(pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]) }
+  }
   const cables = createCables(
     [
       // thick trunks from the two ground monitors up to the main machines
@@ -791,12 +944,10 @@ export async function createHero(
       // thin ones for the keyboard, mouse and headphones
       wire('Float_keyboard', 'Float_pc', 0.004), wire('Float_mouse', 'Float_keyboard', 0.003), wire('Float_headphones', 'Float_pc', 0.0035, '#e8823c'),
     ],
-    { light: tc('#ffffff', '#7f8fd0'), sun: SUN, res: uRes },
+    { sun: SUN, bit, revealBit },
   )
-  for (const m of cables.meshes) {
-    scene.add(m)
-    notInWire.push(m)
-  }
+  for (const c of cables.items) bind(c.material, { uLight: tc('#ffffff', '#7f8fd0'), ...reveals }, ['uReveal'])
+  view.root.addChild(...cables.items.map((c) => c.mesh))
 
   // ---- heading, hung in the scene (not on the page) so the hills can hide it ----
   try {
@@ -828,69 +979,75 @@ export async function createHero(
   tg.font = font(500, TH2)
   tg.letterSpacing = `${-0.011 * TH2}px`
   tg.fillText('aka Siddhant Vij', titleCanvas.width / 2, TPAD + TH1 + TGAP + TH2 * 0.52)
-  const titleTex = new THREE.CanvasTexture(titleCanvas)
-  const uAnim = { value: new THREE.Vector4(1, 0, 1, 0) } // heading position/opacity, subtitle position/opacity
-  const title = new THREE.Mesh(
-    new THREE.PlaneGeometry(1, 1),
-    new THREE.ShaderMaterial({
-      transparent: true,
-      premultipliedAlpha: true,
-      depthWrite: false,
-      uniforms: {
-        map: { value: titleTex },
-        uInk: tc('#171717', '#ededed'),
-        uBlue: { value: new THREE.Color('#498fff') },
-        uCoral: { value: new THREE.Color('#ff7a7a') },
-        uAmber: { value: new THREE.Color('#ffbc74') },
-        uAnim,
-        uSplit: { value: 1 - (TPAD + TH1 + TGAP / 2) / titleCanvas.height },
-      },
-      vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-      // the same gradient as auctervia.tech: ink, then a blue / coral / amber edge, then a faint ghost
-      fragmentShader: /* glsl */ `
-        uniform sampler2D map;
-        uniform vec3 uInk, uBlue, uCoral, uAmber;
-        uniform vec4 uAnim;
-        uniform float uSplit;
-        varying vec2 vUv;
-        void main() {
-          bool head = vUv.y > uSplit;
-          float pos = head ? uAnim.x : uAnim.z;
-          float op = head ? uAnim.y : uAnim.w;
-          float u = (vUv.x + 1.5 * pos) / 2.5; // a 250% wide gradient sliding across
-          vec3 col = mix(uInk, uBlue, smoothstep(0.40, 0.45, u));
-          col = mix(col, uCoral, smoothstep(0.45, 0.50, u));
-          col = mix(col, uAmber, smoothstep(0.50, 0.55, u));
-          col = mix(col, uInk, smoothstep(0.55, 0.60, u));
-          float ghost = mix(1.0, 0.2, smoothstep(0.55, 0.60, u));
-          float cover = texture2D(map, vUv).r * ghost * op;
-          gl_FragColor = vec4(col, 1.0);
-          #include <colorspace_fragment>
-          gl_FragColor = vec4(gl_FragColor.rgb * cover, cover); // premultiplied
-        }`,
+  const titleMat = bind(
+    new FlatMaterial({
+      alphaMode: 'blend',
+      fog: false,
+      textures: { title: Texture.from(titleCanvas) },
+      extraBits: [
+        bit('heroTitle', {
+          textures: ['title'],
+          bindings: { material: { uInk: v3, uBlue: v3, uCoral: v3, uAmber: v3, uAnim: 'vec4<f32>', uSplit: f1 } },
+          // the same gradient as auctervia.tech: ink, then a blue / coral / amber edge, then a faint ghost
+          gl: {
+            fragment: {
+              material: /* glsl */ `{
+                vec2 uv = vUV;
+                bool head = uv.y > material.uSplit;
+                float pos = head ? material.uAnim.x : material.uAnim.z;
+                float op = head ? material.uAnim.y : material.uAnim.w;
+                float u = (uv.x + 1.5 * pos) / 2.5; // a 250% wide gradient sliding across
+                vec3 col = mix(hzL(material.uInk), hzL(material.uBlue), smoothstep(0.40, 0.45, u));
+                col = mix(col, hzL(material.uCoral), smoothstep(0.45, 0.50, u));
+                col = mix(col, hzL(material.uAmber), smoothstep(0.50, 0.55, u));
+                col = mix(col, hzL(material.uInk), smoothstep(0.55, 0.60, u));
+                float ghost = mix(1.0, 0.2, smoothstep(0.55, 0.60, u));
+                albedo = hzOut(col);
+                alpha = sampleTitle(vec2(uv.x, 1.0 - uv.y)).a * ghost * op;
+              }`,
+            },
+          },
+        }),
+      ],
     }),
+    {
+      uInk: tc('#171717', '#ededed'),
+      uBlue: rgb('#498fff'),
+      uCoral: rgb('#ff7a7a'),
+      uAmber: rgb('#ffbc74'),
+      uAnim: [1, 0, 1, 0], // heading position/opacity, subtitle position/opacity
+      uSplit: 1 - (TPAD + TH1 + TGAP / 2) / titleCanvas.height,
+    },
   )
-  title.frustumCulled = false
+  const title = new Mesh3D({ geometry: new PlaneGeometry({ width: 1, height: 1 }), material: titleMat, castShadow: false, receiveShadow: false })
   title.position.z = TITLE_Z
-  scene.add(title)
-  notInWire.push(title)
+  view.root.addChild(title)
   let titleHome = 11
 
-  // ---- theme ----
-  const wantNight = () => {
-    const t = root.dataset.theme
-    return t === 'dark' ? 1 : 0
+  // ---- the intro's wireframe: every edge of the model, ground and trees ----
+  const lines = wireMaterial(bind, { uLine, uWire: 0 })
+  const lineMeshes: Array<Mesh3D> = []
+  for (const m of wired) {
+    const edges: number[] = []
+    const p = getAttributeData(m.geometry!, 'aPosition', 3)
+    const idx = m.geometry!.indices
+    const n = idx ? idx.length : p.length / 3
+    const at = (i: number) => edges.push(p[i * 3], p[i * 3 + 1], p[i * 3 + 2])
+    for (let i = 0; i + 2 < n; i += 3) {
+      const [a, b, c] = idx ? [idx[i], idx[i + 1], idx[i + 2]] : [i, i + 1, i + 2]
+      at(a), at(b), at(b), at(c), at(c), at(a)
+    }
+    const l = new Mesh3D({ geometry: new Geometry3D({ positions: new Float32Array(edges), topology: 'line-list' }), material: lines, castShadow: false, receiveShadow: false })
+    m.addChild(l)
+    lineMeshes.push(l)
   }
-  let night = wantNight()
+
+  // ---- theme ----
+  const wantNight = () => (root.dataset.theme === 'dark' ? 1 : 0)
+  night = wantNight()
   const applyTheme = () => {
-    for (const u of themed) u.value.lerpColors(u.d, u.n, night)
-    uNight.value = night
-    sun.color.copy(sunColor.value)
-    amb.color.copy(ambColor.value)
-    sun.intensity = Math.PI * lerp(0.6, 0.2, night)
-    amb.intensity = Math.PI * lerp(0.56, 0.22, night)
-    glow.intensity = 0.1 * night
-    renderer.setClearColor(uBg.value)
+    for (const { mat, field, tc: c } of themed) mat.data[field] = mix3(c.d, c.n, night)
+    sky.material!.data.uNight = night
     drawThemeIcon?.(night > 0.5)
   }
   applyTheme()
@@ -903,24 +1060,30 @@ export async function createHero(
   let revealAt = 0
   let dirty = true // reduced motion renders on demand only
   let visible = true
-  let comp: ReturnType<typeof createComposite> | null = still
-    ? null
-    : createComposite(renderer, scene, camera, notInWire, uBg, uLine)
+  let time = 0 // animation clock for wind, clouds, steam
+  let aspect = 1
+  let offsetPx = 0 // the picture is slid down by this much, so the title has sky to sit on
+  let pixelRatio = 1
 
   let relayout: (() => void) | null = null
-  const size = new THREE.Vector2()
   const resize = () => {
     const w = canvas.clientWidth
     const h = canvas.clientHeight
     if (!w || !h) return
-    renderer.setPixelRatio(Math.min(devicePixelRatio, desktop ? 2 : 1.5))
-    renderer.setSize(w, h, false)
-    camera.aspect = w / h
+    pixelRatio = Math.min(devicePixelRatio, desktop ? 2 : 1.5)
+    app.renderer.resolution = pixelRatio
+    app.renderer.resize(w, h)
+    shared.uRes = [Math.round(w * pixelRatio), Math.round(h * pixelRatio)]
+    canvas.style.width = canvas.style.height = '' // the stylesheet sizes it
+    view.width = w
+    view.height = h
+    aspect = w / h
     // slide the picture down so the title has sky to sit on; px floor for short laptop screens
-    camera.setViewOffset(w, h, 0, -Math.round(w < h ? h * 0.08 : Math.max(h * 0.07, 105)), w, h)
-    renderer.getDrawingBufferSize(size)
-    uRes.value.copy(size)
-    comp?.setSize(size.x, size.y)
+    offsetPx = Math.round(w < h ? h * 0.08 : Math.max(h * 0.07, 105))
+    // A taller picture (h + 2 offset) centred `offset` lower, with the fov widened to keep the
+    // scale: the part past the bottom of the view is cropped.
+    camera.viewport.set(0, 0, 1, (h + 2 * offsetPx) / h)
+    camera.fov = (360 / Math.PI) * Math.atan((tanHalf * (h + 2 * offsetPx)) / h)
     relayout?.()
     dirty = true
   }
@@ -933,13 +1096,44 @@ export async function createHero(
   const themeObserver = new MutationObserver(() => (dirty = true))
   themeObserver.observe(root, { attributes: true, attributeFilter: ['data-theme'] })
 
+  // ---- camera maths (the view's own matrices include the slide, so poses are worked out here) ----
+  /** Camera position for a pose, pulled back on narrow screens so `need` metres fit. */
+  const fit = (p: typeof WIDE): V3 => {
+    const d = sub(p.pos, p.tgt)
+    const len = Math.hypot(...d)
+    const want = Math.max(len, p.need / (2 * tanHalf * aspect))
+    return [p.tgt[0] + (d[0] * want) / len, p.tgt[1] + (d[1] * want) / len, p.tgt[2] + (d[2] * want) / len]
+  }
+  /** World direction through a point on the canvas (ndc -1..1, y up), for a camera at `eye` looking at `at`. */
+  const rayFrom = (eye: V3, at: V3, nx: number, ny: number): V3 => {
+    const f = norm(sub(at, eye))
+    const r = norm(cross(f, [0, 1, 0]))
+    const u = cross(r, f)
+    const y = ny + (2 * offsetPx) / canvas.clientHeight // undo the slide
+    const sx = nx * tanHalf * aspect
+    const sy = y * tanHalf
+    return norm([f[0] + r[0] * sx + u[0] * sy, f[1] + r[1] * sx + u[1] * sy, f[2] + r[2] * sx + u[2] * sy])
+  }
+  /** Canvas ndc (y up) of a world point, as the current camera sees it. */
+  const project = (p: V3) => {
+    const eye: V3 = [camera.position.x, camera.position.y, camera.position.z]
+    const f = norm(sub(camTarget, eye))
+    const r = norm(cross(f, [0, 1, 0]))
+    const u = cross(r, f)
+    const d = sub(p, eye)
+    const z = dot(d, f)
+    return [dot(d, r) / z / (tanHalf * aspect), dot(d, u) / z / tanHalf - (2 * offsetPx) / canvas.clientHeight] as const
+  }
+  let camTarget: V3 = [...CLOSE.tgt]
+
   // ---- pointer (desktop only): parallax + grass shake under the cursor ----
-  const pointer = new THREE.Vector2()
-  const parallax = new THREE.Vector2()
+  const pointer = { x: 0, y: 0 }
+  const parallax = { x: 0, y: 0 }
   let hovering = false
   const onMove = (e: PointerEvent) => {
     const r = canvas.getBoundingClientRect()
-    pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, 1 - ((e.clientY - r.top) / r.height) * 2)
+    pointer.x = ((e.clientX - r.left) / r.width) * 2 - 1
+    pointer.y = 1 - ((e.clientY - r.top) / r.height) * 2
     hovering = true
   }
   const onLeave = () => (hovering = false)
@@ -950,13 +1144,40 @@ export async function createHero(
 
   // ---- the TV is the colour-mode switch ----
   const tv = nodeOf('Float_tv')
-  const caster = new THREE.Raycaster()
-  const ndc = new THREE.Vector2()
-  const onTv = (e: PointerEvent | MouseEvent) => {
+  const tvBox = (() => {
+    // its box in its own space, measured once, then turned with it each time it is tested
+    const lo: V3 = [Infinity, Infinity, Infinity]
+    const hi: V3 = [-Infinity, -Infinity, -Infinity]
+    const inv = new Matrix4().copyFrom(tv.getGlobalTransform()).getInverse(tv.getGlobalTransform())
+    trianglesOf(tv, (a, b, c) => {
+      for (const w of [a, b, c]) {
+        const q = xform(inv.elements, w[0], w[1], w[2])
+        for (let k = 0; k < 3; k++) {
+          lo[k] = Math.min(lo[k], q[k])
+          hi[k] = Math.max(hi[k], q[k])
+        }
+      }
+    })
+    return { lo, hi }
+  })()
+  const onTv = (e: MouseEvent) => {
     const r = canvas.getBoundingClientRect()
-    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, 1 - ((e.clientY - r.top) / r.height) * 2)
-    caster.setFromCamera(ndc, camera)
-    return caster.intersectObject(tv, true).length > 0
+    const eye: V3 = [camera.position.x, camera.position.y, camera.position.z]
+    const d = rayFrom(eye, camTarget, ((e.clientX - r.left) / r.width) * 2 - 1, 1 - ((e.clientY - r.top) / r.height) * 2)
+    // into the TV's own space, then a slab test against its box
+    const inv = new Matrix4().copyFrom(tv.getGlobalTransform()).getInverse(tv.getGlobalTransform()).elements
+    const o = xform(inv, eye[0], eye[1], eye[2])
+    const e2 = xform(inv, eye[0] + d[0], eye[1] + d[1], eye[2] + d[2])
+    let near = 0
+    let far = Infinity
+    for (let k = 0; k < 3; k++) {
+      const dir = e2[k] - o[k]
+      const t1 = (tvBox.lo[k] - o[k]) / dir
+      const t2 = (tvBox.hi[k] - o[k]) / dir
+      near = Math.max(near, Math.min(t1, t2))
+      far = Math.min(far, Math.max(t1, t2))
+    }
+    return near <= far
   }
   const onClick = (e: MouseEvent) => {
     if (started && onTv(e)) toggleTheme()
@@ -967,46 +1188,29 @@ export async function createHero(
   canvas.addEventListener('click', onClick)
   canvas.addEventListener('pointermove', onHover)
 
-  const pos = new THREE.Vector3()
-  const tgt = new THREE.Vector3()
-  const a = new THREE.Vector3()
-  const b = new THREE.Vector3()
-  const ray = new THREE.Vector3()
-  /** Camera position for a pose, pulled back on narrow screens so `need` metres fit. */
-  const fit = (p: typeof WIDE, out: THREE.Vector3) => {
-    out.subVectors(p.pos, p.tgt)
-    const dist = Math.max(out.length(), p.need / (2 * Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * camera.aspect))
-    return out.setLength(dist).add(p.tgt)
-  }
+  let catHead: V3 = [0, 1.1, -0.06] // centre of the cat's screen
 
-  const catHead = new THREE.Vector3(0, 1.1, -0.06) // centre of the cat's screen
-  const look = new THREE.Vector2()
-  const aim = new THREE.Vector2()
-  let lastLook = new THREE.Vector3(9, 9, 9)
+  const look = { x: 0, y: 0 }
+  let lastLook: V3 = [9, 9, 9]
   let nextBlink = 2 + rand() * 3
   const blinkLen = 0.2
 
   /** Put the heading where the page's text used to sit, as seen from the end of the intro. */
-  const tmpCam = new THREE.PerspectiveCamera()
   const layoutTitle = () => {
     const w = canvas.clientWidth
     const h = canvas.clientHeight
     if (!w || !h) return
-    tmpCam.copy(camera)
-    tmpCam.position.copy(fit(CLOSE, a))
-    tmpCam.lookAt(CLOSE.tgt)
-    tmpCam.updateMatrixWorld()
+    const eye = fit(CLOSE)
     const scale = Math.min(72, Math.max(36, w * 0.06)) / TH1
     const pxW = titleCanvas.width * scale
     const pxH = titleCanvas.height * scale
-    const top = Math.min(150, Math.max(80, h * 0.135)) - TPAD * scale // low enough that the tree tops overlap it a little
-    const ndcY = 1 - (2 * (top + pxH / 2)) / h
-    const dir = new THREE.Vector3(0, ndcY, 0.5).unproject(tmpCam).sub(tmpCam.position).normalize()
-    const hit = tmpCam.position.clone().addScaledVector(dir, (TITLE_Z - tmpCam.position.z) / dir.z)
-    const perPx = (2 * (tmpCam.position.z - TITLE_Z) * Math.tan(THREE.MathUtils.degToRad(FOV / 2))) / h
+    const topPx = Math.min(150, Math.max(80, h * 0.135)) - TPAD * scale // low enough that the tree tops overlap it a little
+    const d = rayFrom(eye, CLOSE.tgt, 0, 1 - (2 * (topPx + pxH / 2)) / h)
+    const k = (TITLE_Z - eye[2]) / d[2]
+    const perPx = (2 * (eye[2] - TITLE_Z) * tanHalf) / h
     title.scale.set(pxW * perPx, pxH * perPx, 1)
-    title.position.x = hit.x
-    titleHome = hit.y
+    title.position.x = eye[0] + d[0] * k
+    titleHome = eye[1] + d[1] * k
   }
   layoutTitle()
   relayout = layoutTitle
@@ -1033,11 +1237,11 @@ export async function createHero(
 
     if (!still) {
       if (started) t += dt
-      uTime.value += dt
+      time += dt
     }
     if (started && !revealed && t >= TITLE_AT) {
       revealed = true
-      revealAt = uTime.value
+      revealAt = time
       opts.onStage('reveal')
     }
     if (started && !finished && t >= ZOOM_END) {
@@ -1048,98 +1252,111 @@ export async function createHero(
     // scrolling: the camera climbs, the heading sinks behind the hills, the parts float away
     const sRaw = clamp01(still ? 0 : opts.scroll.smooth)
     const s = sRaw * sRaw * (3 - 2 * sRaw)
-    ground.uShadowMix.value = s
-    const time = uTime.value
     for (const f of floaters) {
-      const l = s // everything moves together with the camera
-      f.obj.position.lerpVectors(f.home, f.target, l)
-      f.obj.position.y += Math.sin(time * 0.7 + f.phase) * 0.1 * l
-      f.obj.rotation.set(f.spin.x * l + Math.sin(time * 0.5 + f.phase) * 0.06 * l, f.spin.y * l, f.spin.z * l)
+      const p = mix3(f.home, f.target, s) // everything moves together with the camera
+      f.obj.position.set(p[0], p[1] + Math.sin(time * 0.7 + f.phase) * 0.1 * s, p[2])
+      f.obj.rotation.set(f.spin[0] * s + Math.sin(time * 0.5 + f.phase) * 0.06 * s, f.spin[1] * s, f.spin[2] * s)
     }
-    cables.update(s)
-    uMug.value.copy(MUG_OFFSET).applyQuaternion(mugNode.quaternion).add(mugNode.position)
-    catHead.copy(CAT_OFFSET).applyQuaternion(pcNode.quaternion).add(pcNode.position)
+    cables.update(s, canvas.clientHeight * pixelRatio)
+    steamMat.data.uMug = worldOf(mugNode, MUG_OFFSET)
+    catHead = worldOf(pcNode, CAT_OFFSET)
 
     const since = revealed ? time - revealAt : -1
-    const hp = revealEase((since) / 1.2)
+    const hp = revealEase(since / 1.2)
     const sp = revealEase((since - 0.18) / 1.2)
-    uAnim.value.set(1 - hp, since < 0 ? 0 : revealEase(since / 1.2 / 0.15), 1 - sp, since < 0.18 ? 0 : revealEase((since - 0.18) / 1.2 / 0.15))
     // sinks well below the dip between the hills, and fades too, so no sliver shows on any screen
     const sink = smooth(0.04, 0.38, s) // gone just before the card starts forming (CARD_AT in index.tsx)
+    titleMat.data.uAnim = [
+      1 - hp,
+      (since < 0 ? 0 : revealEase(since / 1.2 / 0.15)) * (1 - sink),
+      1 - sp,
+      (since < 0.18 ? 0 : revealEase((since - 0.18) / 1.2 / 0.15)) * (1 - sink),
+    ]
     title.position.y = lerp(titleHome, -4, sink)
-    uAnim.value.y *= 1 - sink
-    uAnim.value.w *= 1 - sink
 
     // camera: intro zoom, then pointer parallax around the target
     const k = zoom(t)
-    pos.lerpVectors(fit(WIDE, a), fit(CLOSE, b), k)
-    tgt.lerpVectors(WIDE.tgt, CLOSE.tgt, k)
+    let pos = mix3(fit(WIDE), fit(CLOSE), k)
+    let tgt = mix3(WIDE.tgt, CLOSE.tgt, k)
     if (s > 0) {
       const u = 1 - s
-      const mid = fit(SKY_MID, a)
-      const end = fit(SKY, b)
-      pos.multiplyScalar(u * u).addScaledVector(mid, 2 * u * s).addScaledVector(end, s * s)
-      tgt.multiplyScalar(u * u).addScaledVector(SKY_MID.tgt, 2 * u * s).addScaledVector(SKY.tgt, s * s)
+      const mid = fit(SKY_MID)
+      const end = fit(SKY)
+      pos = [0, 1, 2].map((i) => pos[i] * u * u + mid[i] * 2 * u * s + end[i] * s * s) as V3
+      tgt = [0, 1, 2].map((i) => tgt[i] * u * u + SKY_MID.tgt[i] * 2 * u * s + SKY.tgt[i] * s * s) as V3
     }
     const active = hovering && t > ZOOM_END
-    parallax.lerp(active ? pointer : pointer.set(0, 0), 1 - Math.exp(-dt * 4))
-    camera.position.copy(pos)
-    camera.lookAt(tgt)
-    camera.translateX(parallax.x * lerp(0.9, 0.45, k))
-    camera.translateY(parallax.y * lerp(0.4, 0.2, k))
-    camera.lookAt(tgt)
-    uOutlinePx.value = lerp(0.8, 1.2, k) * renderer.getPixelRatio()
+    const ease = 1 - Math.exp(-dt * 4)
+    parallax.x = lerp(parallax.x, active ? pointer.x : 0, ease)
+    parallax.y = lerp(parallax.y, active ? pointer.y : 0, ease)
+    {
+      const f = norm(sub(tgt, pos))
+      const r = norm(cross(f, [0, 1, 0]))
+      const up = cross(r, f)
+      const px = parallax.x * lerp(0.9, 0.45, k)
+      const py = parallax.y * lerp(0.4, 0.2, k)
+      pos = [pos[0] + r[0] * px + up[0] * py, pos[1] + r[1] * px + up[1] * py, pos[2] + r[2] * px + up[2] * py]
+    }
+    camera.position.set(...pos)
+    camera.lookAt({ x: tgt[0], y: tgt[1], z: tgt[2] })
+    camTarget = tgt
+    sky.position.set(...pos)
 
     // the cat watches the cursor (or wanders on touch screens) and blinks now and then
     if (drawCat && !still) {
+      let ax: number
+      let ay: number
       if (hovering) {
-        const c = catHead.clone().project(camera)
-        const dx = (pointer.x - c.x) * camera.aspect
-        const dy = pointer.y - c.y
+        const [cx, cy] = project(catHead)
+        const dx = (pointer.x - cx) * aspect
+        const dy = pointer.y - cy
         const len = Math.hypot(dx, dy) || 1
         const m = Math.min(1, len / 0.7) / len
-        aim.set(dx * m, -dy * m)
+        ax = dx * m
+        ay = -dy * m
       } else {
-        aim.set(Math.sin(uTime.value * 0.6) * 0.5, Math.sin(uTime.value * 0.4) * 0.2)
+        ax = Math.sin(time * 0.6) * 0.5
+        ay = Math.sin(time * 0.4) * 0.2
       }
-      look.lerp(aim, 1 - Math.exp(-dt * 8))
-      if (uTime.value > nextBlink + blinkLen) nextBlink = uTime.value + 2.5 + rand() * 4
-      const p = (uTime.value - nextBlink) / blinkLen
+      const e = 1 - Math.exp(-dt * 8)
+      look.x = lerp(look.x, ax, e)
+      look.y = lerp(look.y, ay, e)
+      if (time > nextBlink + blinkLen) nextBlink = time + 2.5 + rand() * 4
+      const p = (time - nextBlink) / blinkLen
       const open = p > 0 && p < 1 ? Math.abs(2 * p - 1) : 1
-      const changed = Math.abs(look.x - lastLook.x) + Math.abs(look.y - lastLook.y) + Math.abs(open - lastLook.z)
+      const changed = Math.abs(look.x - lastLook[0]) + Math.abs(look.y - lastLook[1]) + Math.abs(open - lastLook[2])
       if (changed > 0.01) {
         drawCat(look.x, look.y, open)
-        lastLook.set(look.x, look.y, open)
+        lastLook = [look.x, look.y, open]
       }
     }
 
     // where the cursor ray meets the hill
     let hit = false
     if (active && s < 0.15) {
-      camera.updateMatrixWorld()
-      ray.set(pointer.x, pointer.y, 0.5).unproject(camera).sub(camera.position).normalize()
-      if (ray.y < -0.01) {
+      const ray = rayFrom(pos, tgt, pointer.x, pointer.y)
+      if (ray[1] < -0.01) {
         let y = 0
         for (let i = 0; i < 5; i++) {
-          const s = (y - camera.position.y) / ray.y
-          uPointer.value.set(camera.position.x + ray.x * s, y, camera.position.z + ray.z * s)
-          y = hill(uPointer.value.x, uPointer.value.z)
+          const d = (y - pos[1]) / ray[1]
+          shared.uPointer = [pos[0] + ray[0] * d, y, pos[2] + ray[2] * d]
+          y = hill(shared.uPointer[0], shared.uPointer[2])
         }
         hit = true
       }
     }
-    uShake.value = lerp(uShake.value, hit ? 1 : 0, 1 - Math.exp(-dt * 6))
-
-    if (comp && t >= REVEAL_END) {
-      comp.dispose()
-      comp = null
-    }
-    if (comp) comp.render(t)
-    else renderer.render(scene, camera)
+    shared.uShake = lerp(shared.uShake, hit ? 1 : 0, 1 - Math.exp(-dt * 6))
+    shared.uT = time
+    shared.uShadowMix = s
+    shared.uReveal = still ? 1 : reveal(t)
+    lines.data.uWire = still || t >= REVEAL_END ? 0 : wireFade(t)
+    for (const l of lineMeshes) l.visible = !still && t < REVEAL_END
+    outlineMat.data.uPx = lerp(0.8, 1.2, k) * pixelRatio
+    for (const { mat, keys } of live) for (const key of keys) mat.data[key] = shared[key]
+    app.render()
   }
   raf = requestAnimationFrame(frame)
   opts.onProgress(1)
-
   const start = () => {
     started = true
     opts.onStage('wire')
@@ -1157,31 +1374,20 @@ export async function createHero(
   /** The loader's count once the wireframe shows: 75 → 100, done just before the colour wipe starts. */
   const count = () => 75 + 25 * Math.min(1, t / (REVEAL_START - 0.15))
 
-  return { start, count, dispose: () => {
-    cancelAnimationFrame(raf)
-    resizeObserver.disconnect()
-    viewObserver.disconnect()
-    themeObserver.disconnect()
-    window.removeEventListener('pointermove', onMove)
-    canvas.removeEventListener('click', onClick)
-    canvas.removeEventListener('pointermove', onHover)
-    root.removeEventListener('pointerleave', onLeave)
-    comp?.dispose()
-    cables.dispose()
-    scene.traverse((o) => {
-      const m = o as THREE.Mesh
-      if (!m.isMesh) return
-      m.geometry.dispose()
-      for (const mat of Array.isArray(m.material) ? m.material : [m.material]) {
-        for (const v of Object.values(mat)) if (v instanceof THREE.Texture) v.dispose()
-        for (const u of Object.values((mat as THREE.ShaderMaterial).uniforms ?? {})) {
-          if (u.value instanceof THREE.Texture) u.value.dispose()
-        }
-        mat.dispose()
-      }
-    })
-    gradient.dispose()
-    shadowRT.dispose()
-    renderer.dispose()
-  } }
+  return {
+    start,
+    count,
+    dispose: () => {
+      cancelAnimationFrame(raf)
+      resizeObserver.disconnect()
+      viewObserver.disconnect()
+      themeObserver.disconnect()
+      window.removeEventListener('pointermove', onMove)
+      canvas.removeEventListener('click', onClick)
+      canvas.removeEventListener('pointermove', onHover)
+      root.removeEventListener('pointerleave', onLeave)
+      app.destroy({ removeView: true }, { children: true, texture: true, textureSource: true })
+      // React's canvas stays hidden: another instance (StrictMode's second mount) may be using its spot
+    },
+  }
 }
