@@ -111,7 +111,7 @@ body {
 .stage {
   position: sticky;
   top: 0;
-  height: 100dvh;
+  height: 100svh; /* svh, not dvh: stays put when a phone's browser toolbars show and hide */
 }
 
 .card {
@@ -159,41 +159,6 @@ body {
   white-space: normal;
   text-align: center;
 }
-
-/* fade at the bottom of the hero, used on touch screens only (see below) */
-.hero-fade {
-  display: none;
-  position: absolute;
-  inset: auto 0 0;
-  height: 220px;
-  background: linear-gradient(to bottom, transparent, var(--bg));
-  pointer-events: none;
-}
-
-/* touch screens: a fixed 800px hero that just scrolls away. A fixed height stops the canvas
-   resizing (and flickering) when the mobile browser's toolbars show and hide. */
-@media not ((hover: hover) and (pointer: fine)) {
-  .scroller {
-    height: 800px;
-  }
-
-  .stage {
-    position: relative;
-    height: 800px;
-  }
-
-  /* the scene fades into the page below instead of ending on a hard edge */
-  .hero-fade {
-    display: block;
-  }
-
-  /* the hero can be taller than the screen: keep the pill inside the smallest visible viewport */
-  .scroll-hint {
-    top: min(calc(100svh - 56px), 744px);
-    bottom: auto;
-  }
-}
-
 
 /* reduced motion: no pin, the hero is simply the finished card */
 @media (prefers-reduced-motion: reduce) {

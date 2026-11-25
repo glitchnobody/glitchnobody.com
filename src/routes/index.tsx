@@ -19,6 +19,7 @@ function App() {
   const [stage, setStage] = useState<Stage>('loading')
   const mainEl = useRef<HTMLElement>(null)
   const scroller = useRef<HTMLElement>(null)
+  const stageEl = useRef<HTMLDivElement>(null)
   const navEl = useRef<HTMLElement>(null)
   const hintEl = useRef<HTMLDivElement>(null)
   // shared with the 3D scene: how far through the scroll story we are, 0-1, damped
@@ -38,8 +39,7 @@ function App() {
   }, [stage])
 
   useEffect(() => {
-    // touch screens: the hero is a fixed 800px block that simply scrolls away (no pinning, no card),
-    // and the float plays out as it goes
+    // touch screens get a 4:5 portrait card instead of the 16:11 one
     const touch = !matchMedia('(hover: hover) and (pointer: fine)').matches
     const still = matchMedia('(prefers-reduced-motion: reduce)').matches
     let cardKey = ''
@@ -51,22 +51,24 @@ function App() {
       last = now
       const el = scroller.current
       const main = mainEl.current
-      if (!el || !main) return
+      const st = stageEl.current
+      if (!el || !main || !st) return
+      const H = st.offsetHeight // the pinned stage (100svh): one screen of scroll runs the whole sequence
       const scrolled = stage !== 'done' ? 0 : Math.max(0, -el.getBoundingClientRect().top)
       // one progress value runs the card shrink and the scene's camera and float: 0 to 1 over one screen
-      const raw = clamp01(scrolled / (touch ? 320 : innerHeight))
+      const raw = clamp01(scrolled / H)
       scroll.smooth += (raw - scroll.smooth) * (1 - Math.exp(-dt * 7))
       if (Math.abs(raw - scroll.smooth) < 0.0004) scroll.smooth = raw
-      if (!touch) {
-        // the card's final rect: a centred column (16:11, max 1152px) below the notch. The scene is cropped to
-        // it, p of the way there; Featured Work starts at its bottom edge (--card-gap).
+      {
+        // the card's final rect: a centred column (max 1152px; 16:11, or 4:5 portrait on phones) below the
+        // notch. The scene is cropped to it, p of the way there; Featured Work starts at its bottom edge.
         const p = still ? 1 : raw
         const w = document.documentElement.clientWidth
         const cw = Math.min(1152, w - 32)
         const top = 72
-        const ch = Math.min((cw * 11) / 16, innerHeight - top - 48)
-        const bottom = innerHeight - top - ch
-        const key = `${p}|${w}|${innerHeight}`
+        const ch = Math.min(touch || w < 640 ? (cw * 5) / 4 : (cw * 11) / 16, H - top - 48)
+        const bottom = H - top - ch
+        const key = `${p}|${w}|${H}`
         if (key !== cardKey) {
           cardKey = key
           const s = main.style
@@ -110,11 +112,10 @@ function App() {
         </div>
       </nav>
       <section ref={scroller} className="scroller">
-        <div className="stage">
+        <div ref={stageEl} className="stage">
           <div className="card-shadow" />
           <div className="card">
             <HeroScene onStage={setStage} scroll={scroll} />
-            <div className="hero-fade" aria-hidden="true" />
             <div ref={hintEl} data-show="false" className="scroll-hint glass" aria-hidden="true">
               Scroll to view
               <Icon icon={chevronDown} className="scroll-hint-icon" />
