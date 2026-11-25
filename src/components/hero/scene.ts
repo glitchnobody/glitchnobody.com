@@ -25,10 +25,8 @@ const FOV = 35
 // `need` is the scene width (m) that must stay in frame on narrow screens.
 const WIDE = { pos: [0, 3.7, 12.6] as V3, tgt: [0, 1.1, 0] as V3, need: 3.4 }
 const CLOSE = { pos: [0, 2.6, 6.9] as V3, tgt: [0, 1.15, 0] as V3, need: 2.9 }
-// Scrolling carries the camera from CLOSE, through SKY_MID, to SKY: it lowers a little while tilting
-// up to follow the monitors as they float.
-const SKY_MID = { pos: [0, 2.4, 7.0] as V3, tgt: [0, 1.5, 0] as V3, need: 3.4 }
-const SKY = { pos: [0, 2.15, 7.0] as V3, tgt: [0, 1.9, 0] as V3, need: 3.6 }
+// Scrolling eases the camera from CLOSE to FAR: a little further back and tilted up a few degrees.
+const FAR = { pos: [0, 1.8, 12.0] as V3, tgt: [0, -0.7, 0] as V3, need: 3.4 }
 const TITLE_Z = -34 // the heading hangs here, behind both hills
 
 const tanHalf = Math.tan((FOV * Math.PI) / 360)
@@ -1248,7 +1246,7 @@ export async function createHero(
     const scale = Math.min(72, Math.max(36, w * 0.06)) / TH1
     const pxW = titleCanvas.width * scale
     const pxH = titleCanvas.height * scale
-    const topPx = Math.min(150, Math.max(80, h * 0.135)) - TPAD * scale // low enough that the tree tops overlap it a little
+    const topPx = Math.min(150, Math.max(80, h * 0.135)) + h * 0.07 - TPAD * scale // sits just above the ridge, so the rising hills can cover it on scroll
     const d = rayFrom(eye, CLOSE.tgt, 0, 1 - (2 * (topPx + pxH / 2)) / h)
     const k = (TITLE_Z - eye[2]) / d[2]
     const perPx = (2 * (eye[2] - TITLE_Z) * tanHalf) / h
@@ -1293,11 +1291,10 @@ export async function createHero(
       opts.onStage('done')
     }
 
-    // scrolling: the camera climbs, the heading sinks behind the hills, the parts float away
-    const sRaw = clamp01(still ? 0 : opts.scroll.smooth)
-    const s = sRaw * sRaw * (3 - 2 * sRaw)
+    // scrolling: the camera eases back and tilts up, the parts float away
+    const s = clamp01(still ? 0 : opts.scroll.smooth)
     for (const f of floaters) {
-      const p = mix3(f.home, f.target, s) // everything moves together with the camera
+      const p = mix3(f.home, f.target, s)
       f.obj.position.set(p[0], p[1] + Math.sin(time * 0.7 + f.phase) * 0.1 * s, p[2])
       f.obj.rotation.set(f.spin[0] * s + Math.sin(time * 0.5 + f.phase) * 0.06 * s, f.spin[1] * s, f.spin[2] * s)
     }
@@ -1308,27 +1305,21 @@ export async function createHero(
     const since = revealed ? time - revealAt : -1
     const hp = revealEase(since / 1.2)
     const sp = revealEase((since - 0.18) / 1.2)
-    // sinks well below the dip between the hills, and fades too, so no sliver shows on any screen
-    const sink = smooth(0.04, 0.38, s) // gone just before the card starts forming (CARD_AT in index.tsx)
+    const fade = 1 - smooth(0.05, 0.5, s) // the heading fades out early, before the parts reach it
     titleMat.data.uAnim = [
       1 - hp,
-      (since < 0 ? 0 : revealEase(since / 1.2 / 0.15)) * (1 - sink),
+      (since < 0 ? 0 : revealEase(since / 1.2 / 0.15)) * fade,
       1 - sp,
-      (since < 0.18 ? 0 : revealEase((since - 0.18) / 1.2 / 0.15)) * (1 - sink),
+      (since < 0.18 ? 0 : revealEase((since - 0.18) / 1.2 / 0.15)) * fade,
     ]
-    title.position.y = lerp(titleHome, -4, sink)
+    title.position.y = titleHome
 
     // camera: intro zoom, then pointer parallax around the target
     const k = zoom(t)
     let pos = mix3(fit(WIDE), fit(CLOSE), k)
     let tgt = mix3(WIDE.tgt, CLOSE.tgt, k)
-    if (s > 0) {
-      const u = 1 - s
-      const mid = fit(SKY_MID)
-      const end = fit(SKY)
-      pos = [0, 1, 2].map((i) => pos[i] * u * u + mid[i] * 2 * u * s + end[i] * s * s) as V3
-      tgt = [0, 1, 2].map((i) => tgt[i] * u * u + SKY_MID.tgt[i] * 2 * u * s + SKY.tgt[i] * s * s) as V3
-    }
+    pos = mix3(pos, fit(FAR), s)
+    tgt = mix3(tgt, FAR.tgt, s)
     const active = hovering && t > ZOOM_END
     const ease = 1 - Math.exp(-dt * 4)
     parallax.x = lerp(parallax.x, active ? pointer.x : 0, ease)
@@ -1390,8 +1381,8 @@ export async function createHero(
       }
     }
     shared.uShake = lerp(shared.uShake, hit ? 1 : 0, 1 - Math.exp(-dt * 6))
-    shared.uT = time
     shared.uShadowMix = s
+    shared.uT = time
     shared.uReveal = still ? 1 : reveal(t)
     lines.data.uWire = still || t >= REVEAL_END ? 0 : wireFade(t)
     for (const l of lineMeshes) l.visible = !still && t < REVEAL_END

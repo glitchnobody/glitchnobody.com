@@ -101,48 +101,42 @@ body {
   opacity: 0;
 }
 
-/* ---- scroll story: a sticky stage that shrinks into a card, then the next section ---- */
-/* pinned while things float and the card forms (60svh + 100px), then the page scrolls normally */
+/* ---- scroll story: the full-screen scene is pinned for one screen of scrolling while it shrinks into a card,
+   then the card scrolls away. --t/--m/--b/--r (card insets and radius) and --card-gap are set from index.tsx;
+   the canvas is only cropped, never resized. ---- */
 .scroller {
-  height: calc(160svh + 100px);
+  height: 200svh;
 }
 
 .stage {
   position: sticky;
   top: 0;
   height: 100dvh;
-  background: var(--bg);
-  --card: 0; /* 0 full screen, 1 card; set while scrolling */
-  --card-margin: 60px;
-  --m: calc(var(--card) * var(--card-margin));
-  --b: calc(var(--card) * 48px);
-  --r: calc(var(--card) * 28px);
-}
-
-@media (max-width: 639px) {
-  .stage {
-    --card-margin: 16px;
-  }
 }
 
 .card {
   position: absolute;
   inset: 0;
-  clip-path: inset(0 var(--m) var(--b) var(--m) round 0 0 var(--r) var(--r));
+  clip-path: inset(var(--t, 0px) var(--m, 0px) var(--b, 0px) var(--m, 0px) round var(--r, 0px));
 }
 
 /* the soft shadow along the card's bottom edge, falling onto the next section */
 .card-shadow {
   position: absolute;
-  inset: 0 var(--m) var(--b) var(--m);
-  border-radius: 0 0 var(--r) var(--r);
-  box-shadow: 0 34px 60px -22px rgb(0 0 0 / calc(var(--card) * 0.42));
+  inset: var(--t, 0px) var(--m, 0px) var(--b, 0px) var(--m, 0px);
+  border-radius: var(--r, 0px);
+  box-shadow: 0 34px 60px -22px rgb(0 0 0 / calc(var(--p, 0) * 0.42));
   pointer-events: none;
 }
 
 /* on the dark page the shadow is lost, so the card gets a faint rim instead */
 :root[data-theme="dark"] .card-shadow {
-  box-shadow: 0 0 0 1px rgb(255 255 255 / calc(var(--card) * 0.1));
+  box-shadow: 0 0 0 1px rgb(255 255 255 / calc(var(--p, 0) * 0.1));
+}
+
+/* Featured Work starts under the card's final bottom edge, so it rises into the gap as the card shrinks */
+.work {
+  margin-top: calc(-1 * var(--card-gap, 0px));
 }
 
 /* the heading lives in the 3D scene; this copy is for screen readers and search, and shows if WebGL fails */
@@ -200,9 +194,15 @@ body {
   }
 }
 
+
+/* reduced motion: no pin, the hero is simply the finished card */
 @media (prefers-reduced-motion: reduce) {
   .scroller {
     height: 100svh;
+  }
+
+  .stage {
+    position: relative;
   }
 }
 
