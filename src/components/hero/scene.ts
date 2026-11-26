@@ -26,7 +26,9 @@ const FOV = 35
 const WIDE = { pos: [0, 3.7, 12.6] as V3, tgt: [0, 1.1, 0] as V3, need: 3.4 }
 const CLOSE = { pos: [0, 2.6, 6.9] as V3, tgt: [0, 1.15, 0] as V3, need: 2.9 }
 // Scrolling eases the camera from CLOSE to FAR: a little further back and tilted up a few degrees.
-const FAR = { pos: [0, 1.8, 12.0] as V3, tgt: [0, -0.7, 0] as V3, need: 3.4 }
+const FAR = { pos: [0, 1.8, 12.0] as V3, tgt: [0, -0.2, 0] as V3, need: 3.4 }
+// portrait screens (phones): look a little higher so the scene sits lower in the 4:5 card, with more sky
+const FAR_PORTRAIT = { pos: [0, 1.8, 12.0] as V3, tgt: [0, 0.1, 0] as V3, need: 3.4 }
 const TITLE_Z = -34 // the heading hangs here, behind both hills
 
 const tanHalf = Math.tan((FOV * Math.PI) / 360)
@@ -1318,8 +1320,9 @@ export async function createHero(
     const k = zoom(t)
     let pos = mix3(fit(WIDE), fit(CLOSE), k)
     let tgt = mix3(WIDE.tgt, CLOSE.tgt, k)
-    pos = mix3(pos, fit(FAR), s)
-    tgt = mix3(tgt, FAR.tgt, s)
+    const far = aspect < 1 ? FAR_PORTRAIT : FAR
+    pos = mix3(pos, fit(far), s)
+    tgt = mix3(tgt, far.tgt, s)
     const active = hovering && t > ZOOM_END
     const ease = 1 - Math.exp(-dt * 4)
     parallax.x = lerp(parallax.x, active ? pointer.x : 0, ease)

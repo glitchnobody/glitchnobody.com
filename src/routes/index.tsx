@@ -60,13 +60,13 @@ function App() {
       scroll.smooth += (raw - scroll.smooth) * (1 - Math.exp(-dt * 7))
       if (Math.abs(raw - scroll.smooth) < 0.0004) scroll.smooth = raw
       {
-        // the card's final rect: a centred column (max 1152px; 16:11, or 4:5 portrait on phones) below the
-        // notch. The scene is cropped to it, p of the way there; Featured Work starts at its bottom edge.
+        // the card's final rect: the page wrapper's width (max 1500px, gutter 16px, or 60px from 640px up; see
+        // .wrap in styles.css) 65vh tall, or a 5:7 portrait on phones, below the notch. The scene is cropped to it, p of the way there; Featured Work starts at its bottom edge.
         const p = still ? 1 : raw
         const w = document.documentElement.clientWidth
-        const cw = Math.min(1152, w - 32)
+        const cw = Math.min(1500, w - 2 * (w < 640 ? 16 : 60))
         const top = 72
-        const ch = Math.min(touch || w < 640 ? (cw * 5) / 4 : (cw * 11) / 16, H - top - 48)
+        const ch = Math.min(touch || w < 640 ? cw * 1.4 : H * 0.65, H - top - 48)
         const bottom = H - top - ch
         const key = `${p}|${w}|${H}`
         if (key !== cardKey) {
@@ -127,8 +127,10 @@ function App() {
           </div>
         </div>
       </section>
-      <section id="work" className="work relative h-[1200px] px-4 pt-24 text-center sm:px-[60px]">
-        <h2 className="text-[clamp(2.5rem,6vw,5rem)] font-semibold leading-none tracking-tight">Featured Work</h2>
+      <section id="work" className="work relative h-[1200px] pt-6 text-center sm:pt-24">
+        <div className="wrap">
+          <h2 className="text-[clamp(2.5rem,6vw,5rem)] font-semibold leading-none tracking-tight">Featured Work</h2>
+        </div>
       </section>
     </main>
   )

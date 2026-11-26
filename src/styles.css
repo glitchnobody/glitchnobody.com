@@ -101,6 +101,23 @@ body {
   opacity: 0;
 }
 
+/* ---- shared page wrapper: content is at most 1500px wide with a side gutter (the hero card uses the same
+   numbers in index.tsx, so the card and the sections below line up) ---- */
+:root {
+  --gutter: 16px;
+}
+
+@media (min-width: 640px) {
+  :root {
+    --gutter: 60px;
+  }
+}
+
+.wrap {
+  width: min(100% - 2 * var(--gutter), 1500px);
+  margin-inline: auto;
+}
+
 /* ---- scroll story: the full-screen scene is pinned for one screen of scrolling while it shrinks into a card,
    then the card scrolls away. --t/--m/--b/--r (card insets and radius) and --card-gap are set from index.tsx;
    the canvas is only cropped, never resized. ---- */
@@ -120,16 +137,14 @@ body {
   clip-path: inset(var(--t, 0px) var(--m, 0px) var(--b, 0px) var(--m, 0px) round var(--r, 0px));
 }
 
-/* the soft shadow along the card's bottom edge, falling onto the next section */
+/* the card is flat on the light page; on the dark page its edge is lost, so it gets a faint rim */
 .card-shadow {
   position: absolute;
   inset: var(--t, 0px) var(--m, 0px) var(--b, 0px) var(--m, 0px);
   border-radius: var(--r, 0px);
-  box-shadow: 0 34px 60px -22px rgb(0 0 0 / calc(var(--p, 0) * 0.42));
   pointer-events: none;
 }
 
-/* on the dark page the shadow is lost, so the card gets a faint rim instead */
 :root[data-theme="dark"] .card-shadow {
   box-shadow: 0 0 0 1px rgb(255 255 255 / calc(var(--p, 0) * 0.1));
 }
